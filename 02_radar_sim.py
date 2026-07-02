@@ -26,8 +26,7 @@ np.random.seed(42)
 TQ_MIN, TQ_MAX = 1, 15
 SIGMA_POS_MAX, SIGMA_POS_MIN = 1500.0, 30.0
 SIGMA_VEL_MAX, SIGMA_VEL_MIN = 25.0, 0.5
-GROUND_TRUTH_CSV = "ground_truth_adsb.csv"
-
+GROUND_TRUTH_CSV = "ground_truth_adsb_multi.csv"  # YENİ ÇOKLU HEDEF DOSYASI BURAYA
 # Cikti dosyasi adlari (degistirildi — ikisi ayri ayri uretiliyor)
 SENSOR_TRACKS_IDEALIZE_CSV = "radar_sensor_tracks_idealize.csv"
 SENSOR_TRACKS_GERCEKCI_CSV = "radar_sensor_tracks_gercekci.csv"

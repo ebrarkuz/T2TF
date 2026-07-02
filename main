@@ -13,8 +13,7 @@ from fusion_evaluation import compute_tracking_metrics
 SIMULATOR_SCRIPT = "02_radar_sim.py"
 BASIC_FUSION_SCRIPT = "füzyon_basic.py"  # 3. dosyanızın adı (Örn: temel_fuzyon.py)
 ADV_FUSION_SCRIPT = "füzyon2.py"    # 4. dosyanızın adı
-GROUND_TRUTH_CSV = "ground_truth_adsb.csv"
-
+GROUND_TRUTH_CSV = "ground_truth_adsb_multi.csv"  # YENİ ÇOKLU HEDEF DOSYASI BURAYA
 def run_script(script_name):
     """Verilen Python dosyasını bir alt süreç (subprocess) olarak çalıştırır."""
     print(f"  -> Çalıştırılıyor: {script_name}")

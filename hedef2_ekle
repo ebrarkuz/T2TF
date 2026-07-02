@@ -1,0 +1,32 @@
+import pandas as pd
+
+# 1. Mevcut tek uçaklı veriyi oku
+df1 = pd.read_csv("ground_truth_adsb.csv")
+
+# 2. İkinci uçak için verinin kopyasını oluştur
+df2 = df1.copy()
+
+# 3. İkinci uçağın adını (callsign) değiştir
+# Mevcut uçağınızın adı örneğin 'UCAK_1' ise, bunu 'UCAK_2' yapıyoruz.
+df2["callsign"] = "HEDEF_2" 
+
+# 4. Rota Kesişimi Yaratmak (Mirroring / Aynalama)
+# Uçağın X eksenindeki hareketini tersine çevirerek "kafa kafaya" veya "çapraz"
+# kesişmelerini sağlayabiliriz.
+merkez_x = df1["x"].mean()
+
+# X konumunu merkeze göre ayna görüntüsü al (tam tersi yönden gelsin)
+df2["x"] = merkez_x - (df1["x"] - merkez_x)
+
+# X konumu tersine döndüğü için, X yönündeki hızını (vx) da tersine çevirmeliyiz
+df2["vx"] = -df1["vx"]
+
+# Y eksenine de hafif bir kayma (offset) ekleyebilirsiniz (isteğe bağlı)
+# df2["y"] = df2["y"] + 2000  # 2 km paralel kaydırma gibi
+
+# 5. İki uçağın verilerini birleştir ve zamana göre sırala
+df_multi = pd.concat([df1, df2]).sort_values("time").reset_index(drop=True)
+
+# 6. Yeni zorlu verisetini kaydet
+df_multi.to_csv("ground_truth_adsb_multi.csv", index=False)
+print("Çoklu hedef verisi başarıyla oluşturuldu: ground_truth_adsb_multi.csv")
