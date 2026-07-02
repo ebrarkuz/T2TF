@@ -1,0 +1,127 @@
+import os
+import shutil
+import subprocess
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# 2. dosyadaki (fusion_evaluation.py) metrik hesaplama fonksiyonunu içe aktarıyoruz
+from fusion_evaluation import compute_tracking_metrics
+
+# ==========================================
+# KONFİGÜRASYON (Dosya isimlerinizi buraya girin)
+# ==========================================
+SIMULATOR_SCRIPT = "02_radar_sim.py"
+BASIC_FUSION_SCRIPT = "füzyon_basic.py"  # 3. dosyanızın adı (Örn: temel_fuzyon.py)
+ADV_FUSION_SCRIPT = "füzyon2.py"    # 4. dosyanızın adı
+GROUND_TRUTH_CSV = "ground_truth_adsb.csv"
+
+def run_script(script_name):
+    """Verilen Python dosyasını bir alt süreç (subprocess) olarak çalıştırır."""
+    print(f"  -> Çalıştırılıyor: {script_name}")
+    result = subprocess.run(["python", script_name], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"  [!] HATA ({script_name}):\n{result.stderr}")
+    return result.returncode == 0
+
+def main():
+    print("=" * 70)
+    print("RADAR FÜZYON BÜTÜNLEŞİK TEST ORKESTRASYONU")
+    print("=" * 70)
+
+    # 1. Simülatörü Çalıştır (İdealize ve Gerçekçi CSV'leri üretir)
+    print("\n[AŞAMA 1] Simülasyon Verileri Üretiliyor...")
+    if not run_script(SIMULATOR_SCRIPT):
+        return
+
+    # 2. İdealize Senaryo Döngüsü
+    print("\n[AŞAMA 2] İdealize Radar Senaryosu Koşuluyor...")
+    # Füzyon algoritmaları 'radar_sensor_tracks.csv' okuduğu için dosyayı kopyalıyoruz
+    shutil.copy("radar_sensor_tracks_idealize.csv", "radar_sensor_tracks.csv")
+    
+    # Temel Füzyon
+    run_script(BASIC_FUSION_SCRIPT)
+    shutil.copy("basic_fusion_sonuclari.csv", "res_ideal_basic.csv")
+    
+    # Gelişmiş Füzyon (Covariance Intersection)
+    run_script(ADV_FUSION_SCRIPT)
+    shutil.copy("fused_tracks.csv", "res_ideal_adv.csv")
+
+    # 3. Gerçekçi Senaryo Döngüsü
+    print("\n[AŞAMA 3] Gerçekçi Radar Senaryosu Koşuluyor...")
+    shutil.copy("radar_sensor_tracks_gercekci.csv", "radar_sensor_tracks.csv")
+    
+    # Temel Füzyon
+    run_script(BASIC_FUSION_SCRIPT)
+    shutil.copy("basic_fusion_sonuclari.csv", "res_real_basic.csv")
+    
+    # Gelişmiş Füzyon
+    run_script(ADV_FUSION_SCRIPT)
+    shutil.copy("fused_tracks.csv", "res_real_adv.csv")
+
+    # 4. Sonuçların Değerlendirilmesi
+    print("\n[AŞAMA 4] Metrikler Hesaplanıyor ve Karşılaştırılıyor...")
+    try:
+        gt_df = pd.read_csv(GROUND_TRUTH_CSV)
+    except FileNotFoundError:
+        print(f"HATA: {GROUND_TRUTH_CSV} bulunamadı.")
+        return
+
+    # 4 Farklı sonucun CSV'lerini güvenli şekilde yükle
+    dfs = {
+        "İdealize + Temel": pd.read_csv("res_ideal_basic.csv") if os.path.exists("res_ideal_basic.csv") else pd.DataFrame(),
+        "İdealize + Gelişmiş": pd.read_csv("res_ideal_adv.csv") if os.path.exists("res_ideal_adv.csv") else pd.DataFrame(),
+        "Gerçekçi + Temel": pd.read_csv("res_real_basic.csv") if os.path.exists("res_real_basic.csv") else pd.DataFrame(),
+        "Gerçekçi + Gelişmiş": pd.read_csv("res_real_adv.csv") if os.path.exists("res_real_adv.csv") else pd.DataFrame()
+    }
+
+    # Metrikleri degerlendirme.py içerisindeki fonksiyon ile hesapla
+    metrics = {name: compute_tracking_metrics(gt_df, df) for name, df in dfs.items()}
+
+    # Konsola temiz bir Pandas tablosu bas
+    comp_df = pd.DataFrame(metrics).T
+    comp_df = comp_df[['precision', 'recall', 'f1_score', 'mota', 'id_switches', 'rmse_pos_m', 'rmse_vel_mps', 'nees']]
+    comp_df.columns = ['Precision', 'Recall', 'F1 Score', 'MOTA', 'ID Switch', 'RMSE Pos', 'RMSE Vel', 'NEES']
+    
+    print("\n" + "=" * 90)
+    print(f"{'4\'LÜ KOMBİNASYON METRİK KARŞILAŞTIRMASI':^90}")
+    print("=" * 90)
+    print(comp_df.round(3).to_string())
+    print("=" * 90)
+
+    # 5. Görselleştirme (4'lü Alt Grafik)
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+    fig.suptitle("Füzyon Algoritmaları Tüm Senaryolar XY Konum Karşılaştırması", fontsize=16, fontweight="bold")
+    
+    plot_coords = [(0, 0), (0, 1), (1, 0), (1, 1)]
+    for (name, df), (row, col) in zip(dfs.items(), plot_coords):
+        ax = axes[row, col]
+        ax.set_title(name)
+        
+        # Ground Truth Çizimi
+        for cs in gt_df['callsign'].unique() if 'callsign' in gt_df.columns else gt_df['target'].unique():
+            sub = gt_df[gt_df.get('callsign', gt_df.get('target')) == cs].sort_values("time")
+            ax.plot(sub["x"], sub["y"], 'k--', linewidth=2, alpha=0.6)
+            
+        # Füzyon Track Çizimi
+        if not df.empty and "global_track_id" in df.columns:
+            for tid in df["global_track_id"].unique():
+                tdf = df[df["global_track_id"] == tid].sort_values("time")
+                ax.plot(tdf["x"], tdf["y"], linewidth=2, label=f"{tid}")
+                ax.scatter(tdf["x"], tdf["y"], s=10)
+                
+        ax.set_xlabel("x (m)")
+        ax.set_ylabel("y (m)")
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect("equal", adjustable="datalim")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig("tum_senaryolar_xy.png", dpi=150)
+    print("\n-> Karşılaştırma grafiği 'tum_senaryolar_xy.png' olarak kaydedildi.")
+    plt.show()
+
+    # Ortam Temizliği (Artık CSV'leri silmek isterseniz bu bloğu aktif edebilirsiniz)
+    # for f in ["radar_sensor_tracks.csv", "res_ideal_basic.csv", "res_ideal_adv.csv", "res_real_basic.csv", "res_real_adv.csv"]:
+    #     if os.path.exists(f): os.remove(f)
+
+if __name__ == "__main__":
+    main()
