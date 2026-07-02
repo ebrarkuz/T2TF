@@ -1,0 +1,74 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+def visualize_tracking_performance():
+    # 1. Dosyaları Yükle
+    try:
+        gt_df = pd.read_csv("ground_truth_adsb4.csv")
+        fused_df = pd.read_csv("fused_tracks.csv")
+        basic_df = pd.read_csv("basic_fusion_sonuclari.csv")
+    except FileNotFoundError as e:
+        print(f"HATA: Dosya bulunamadı. Lütfen dosya isimlerini kontrol edin.\nDetay: {e}")
+        return
+
+    # 2. Çizim Alanını Oluştur (2 satır, 2 sütun)
+    # Üst satır: fused_tracks | Alt satır: basic_fusion
+    fig, axs = plt.subplots(2, 2, figsize=(20, 14))
+    fig.suptitle("Track-to-Track Füzyon Karşılaştırmalı Performans Analizi", fontsize=18, fontweight='bold')
+
+    # Kod tekrarını önlemek için çizim mantığını bir alt fonksiyona alıyoruz
+    def plot_algorithm(ax_xy, ax_time, result_df, title_name):
+        gt_key = "callsign" if "callsign" in gt_df.columns else "target"
+        
+        # --- Gerçek Hedefleri Çiz (Arka plan) ---
+        for target_name, group in gt_df.groupby(gt_key):
+            color = 'black' if 'LINEAR' in str(target_name) else 'gray'
+            # X-Y Haritası için Ground Truth
+            ax_xy.plot(group["x"], group["y"], label=f"Gerçek: {target_name}", linewidth=6, alpha=0.3, color=color)
+            # Zaman-Y Haritası için Ground Truth
+            ax_time.plot(group["time"], group["y"], label=f"Gerçek: {target_name}", linewidth=6, alpha=0.3, color=color)
+
+        # --- Füzyon Çıktılarını Çiz ---
+        unique_ids = result_df["global_track_id"].unique()
+        colors = plt.cm.tab20(np.linspace(0, 1, len(unique_ids))) 
+
+        for (track_id, group), color in zip(result_df.groupby("global_track_id"), colors):
+            # X-Y Haritası (Sürekli Çizgi + Nokta)
+            ax_xy.plot(group["x"], group["y"], marker='o', markersize=4, linestyle='-', label=f"{track_id}", color=color)
+            if not group.empty:
+                ax_xy.text(group["x"].iloc[0], group["y"].iloc[0] + 200, track_id, fontsize=8, color=color, fontweight='bold')
+            
+            # Zaman vs Y-Ekseni (Sadece Nokta - Kopmaları daha net görmek için)
+            ax_time.plot(group["time"], group["y"], marker='X', markersize=6, linestyle='', color=color)
+
+        # --- Eksen ve Başlık Ayarları ---
+        ax_xy.set_title(f"{title_name} - X-Y Konum Haritası", fontsize=12, fontweight='semibold')
+        ax_xy.set_xlabel("X (metre)")
+        ax_xy.set_ylabel("Y (metre)")
+        ax_xy.grid(True, linestyle='--', alpha=0.7)
+        
+        ax_time.set_title(f"{title_name} - Zaman vs Y-Ekseni (Kopma Analizi)", fontsize=12, fontweight='semibold')
+        ax_time.set_xlabel("Zaman (saniye)")
+        ax_time.set_ylabel("Y Ekseni Konumu (metre)")
+        ax_time.grid(True, linestyle='--', alpha=0.7)
+
+        # Legend Ayarları (Aynı etiketlerin tekrarını önleyip sadece ilk 15'i gösterme)
+        handles, labels = ax_xy.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles)) # Duplicate labelları temizler
+        ax_xy.legend(list(by_label.values())[:15], list(by_label.keys())[:15], loc='best', fontsize='small')
+
+    # 1. Satırı Doldur: Gelişmiş Füzyon
+    plot_algorithm(axs[0, 0], axs[0, 1], fused_df, "Gelişmiş Füzyon (fused_tracks.csv)")
+
+    # 2. Satırı Doldur: Temel Füzyon
+    plot_algorithm(axs[1, 0], axs[1, 1], basic_df, "Temel Füzyon (basic_fusion_sonuclari.csv)")
+
+    # Görünüm Ayarları
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.93) # Ana başlık için üstten boşluk
+    plt.show()
+
+if __name__ == "__main__":
+    print("Grafik hazırlanıyor... Lütfen bekleyin.")
+    visualize_tracking_performance()
