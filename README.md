@@ -1,4 +1,4 @@
-## 4-Combination Performance Comparison
+## 4-Combination Performance Comparison- two target X 
 
 | Configuration | Precision | Recall | F1 Score | MOTA | ID Switch | RMSE Pos | RMSE Vel | NEES |
 |--------------|----------:|-------:|---------:|-----:|----------:|---------:|---------:|-----:|
@@ -7,7 +7,7 @@
 | Realistic + Baseline | 0.066 | 0.184 | 0.097 | -2.420 | 0 | 264.703 | 2.602 | 70074.249 |
 | Realistic + Advanced | 0.983 | 0.963 | 0.973 | 0.946 | 0 | 326.318 | 5.103 | 3.664 |
 
-## 3-Target System Results
+## 3-Target System- Results
 
 | Configuration | Precision | Recall | F1 Score | MOTA | ID Switch | RMSE Pos | RMSE Vel | NEES |
 |--------------|----------:|-------:|---------:|-----:|----------:|---------:|---------:|-----:|
@@ -17,7 +17,7 @@
 | Realistic + Advanced | 0.896 | 0.684 | 0.776 | 0.604 | 4 | 373.719 | 9.049 | 7.761 |
 
 
-## 5-Configuration System Results
+## 5-Configuration System Results- no CI version
 
 | Configuration | Precision | Recall | F1 Score | MOTA | ID Switch | RMSE Pos | RMSE Vel | NEES |
 |--------------|----------:|-------:|---------:|-----:|----------:|---------:|---------:|-----:|
