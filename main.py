@@ -94,17 +94,37 @@ def main():
             sub = gt_df[gt_df.get('callsign', gt_df.get('target')) == cs].sort_values('time')
             ax.plot(sub['x'], sub['y'], 'k--', linewidth=2, alpha=0.6)
 
+        # Ham sensör track'leri (radar bazında, ince çizgiyle)
+        sensor_csv = IDEALIZE_SENSOR_CSV if 'İdealize' in name else GERCEKCI_SENSOR_CSV
+        try:
+            sensor_df = pd.read_csv(sensor_csv)
+        except Exception:
+            sensor_df = pd.DataFrame()
+
+        if not sensor_df.empty and 'sensor' in sensor_df.columns and 'local_track_id' in sensor_df.columns:
+            for i, (sensor_name, group) in enumerate(sensor_df.groupby('sensor')):
+                color = f"C{(i + 2) % 10}"
+                first = True
+                for lt, g in group.groupby('local_track_id'):
+                    g = g.sort_values('time')
+                    if first:
+                        ax.plot(g['x'], g['y'], linewidth=1.0, alpha=0.45, color=color, label=sensor_name)
+                        first = False
+                    else:
+                        ax.plot(g['x'], g['y'], linewidth=0.8, alpha=0.18, color=color)
+
         # Füzyon sonuçları çizimi
         if not df.empty and 'global_track_id' in df.columns:
             for tid in df['global_track_id'].unique():
                 tdf = df[df['global_track_id'] == tid].sort_values('time')
-                ax.plot(tdf['x'], tdf['y'], linewidth=2, label=f"{tid}")
+                ax.plot(tdf['x'], tdf['y'], linewidth=2, label=f"GT {tid}")
                 ax.scatter(tdf['x'], tdf['y'], s=10)
 
         ax.set_xlabel('x (m)')
         ax.set_ylabel('y (m)')
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal', adjustable='datalim')
+        ax.legend(fontsize='small', loc='upper right')
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig('tum_senaryolar_xy.png', dpi=150)
