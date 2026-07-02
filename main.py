@@ -13,15 +13,18 @@ from radar_sim import generate_sensor_csvs
 GROUND_TRUTH_CSV = "ground_truth_adsb_multi.csv"
 IDEALIZE_SENSOR_CSV = "radar_sensor_tracks_idealize.csv"
 GERCEKCI_SENSOR_CSV = "radar_sensor_tracks_gercekci.csv"
+
+# Çıktı Dosyaları
 RES_IDEAL_BASIC = "res_ideal_basic.csv"
 RES_IDEAL_ADV = "res_ideal_adv.csv"
 RES_REAL_BASIC = "res_real_basic.csv"
 RES_REAL_ADV = "res_real_adv.csv"
+RES_REAL_ADV_NOCI = "res_real_adv_noci.csv"  # YENİ: CI Olmayan Senaryo
 
 
 def main():
     print("=" * 70)
-    print("RADAR FÜZYON BÜTÜNLEŞİK TEST ORKESTRASYONU")
+    print("RADAR FÜZYON BÜTÜNLEŞİK TEST ORKESTRASYONU (5 SENARYO)")
     print("=" * 70)
 
     print("\n[AŞAMA 1] Simülasyon Verileri Üretiliyor...")
@@ -33,11 +36,16 @@ def main():
 
     print("\n[AŞAMA 2] İdealize Radar Senaryosu Koşuluyor...")
     run_basic_fusion(sensor_csv=IDEALIZE_SENSOR_CSV, output_csv=RES_IDEAL_BASIC)
-    run_advanced_fusion(sensor_csv=IDEALIZE_SENSOR_CSV, output_csv=RES_IDEAL_ADV)
+    run_advanced_fusion(sensor_csv=IDEALIZE_SENSOR_CSV, output_csv=RES_IDEAL_ADV, use_ci=True)
 
     print("\n[AŞAMA 3] Gerçekçi Radar Senaryosu Koşuluyor...")
     run_basic_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_BASIC)
-    run_advanced_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_ADV)
+    
+    # CI Açık (Orijinal Covariance Intersection)
+    run_advanced_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_ADV, use_ci=True)
+    
+    # CI Kapalı (Sadece Standart LMMSE Kalman)
+    run_advanced_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_ADV_NOCI, use_ci=False)
 
     print("\n[AŞAMA 4] Metrikler Hesaplanıyor ve Karşılaştırılıyor...")
     try:
@@ -46,11 +54,13 @@ def main():
         print(f"HATA: {GROUND_TRUTH_CSV} bulunamadı.")
         return
 
+    # Sözlüğe 5. Senaryoyu Ekledik
     dfs = {
         "İdealize + Temel": pd.read_csv(RES_IDEAL_BASIC) if os.path.exists(RES_IDEAL_BASIC) else pd.DataFrame(),
-        "İdealize + Gelişmiş": pd.read_csv(RES_IDEAL_ADV) if os.path.exists(RES_IDEAL_ADV) else pd.DataFrame(),
+        "İdealize + Gelişmiş (CI)": pd.read_csv(RES_IDEAL_ADV) if os.path.exists(RES_IDEAL_ADV) else pd.DataFrame(),
         "Gerçekçi + Temel": pd.read_csv(RES_REAL_BASIC) if os.path.exists(RES_REAL_BASIC) else pd.DataFrame(),
-        "Gerçekçi + Gelişmiş": pd.read_csv(RES_REAL_ADV) if os.path.exists(RES_REAL_ADV) else pd.DataFrame(),
+        "Gerçekçi + Gelişmiş (CI)": pd.read_csv(RES_REAL_ADV) if os.path.exists(RES_REAL_ADV) else pd.DataFrame(),
+        "Gerçekçi + Gelişmiş (No-CI)": pd.read_csv(RES_REAL_ADV_NOCI) if os.path.exists(RES_REAL_ADV_NOCI) else pd.DataFrame(),
     }
 
     metrics = {name: compute_tracking_metrics(gt_df, df) for name, df in dfs.items()}
@@ -60,23 +70,31 @@ def main():
     comp_df.columns = ['Precision', 'Recall', 'F1 Score', 'MOTA', 'ID Switch', 'RMSE Pos', 'RMSE Vel', 'NEES']
 
     print("\n" + "=" * 90)
-    print("4'LÜ KOMBİNASYON METRİK KARŞILAŞTIRMASI".center(90))    
+    print("5'Lİ KOMBİNASYON METRİK KARŞILAŞTIRMASI".center(90))    
     print("=" * 90)
     print(comp_df.round(3).to_string())
     print("=" * 90)
 
-    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
-    fig.suptitle("Füzyon Algoritmaları Tüm Senaryolar XY Konum Karşılaştırması", fontsize=16, fontweight="bold")
+    # 5 Grafik çizeceğimiz için 2x3 ızgara oluşturuyoruz
+    fig, axes = plt.subplots(2, 3, figsize=(24, 12))
+    fig.suptitle("Füzyon Algoritmaları Tüm Senaryolar XY Konum Karşılaştırması", fontsize=18, fontweight="bold")
 
-    plot_coords = [(0, 0), (0, 1), (1, 0), (1, 1)]
+    # Matrisin sağ üst köşesini (0, 2) boş bırakıp gizliyoruz ki estetik dursun
+    fig.delaxes(axes[0, 2])
+
+    # 5 Senaryonun yerleşim koordinatları
+    plot_coords = [(0, 0), (0, 1), (1, 0), (1, 1), (1, 2)]
+    
     for (name, df), (row, col) in zip(dfs.items(), plot_coords):
         ax = axes[row, col]
         ax.set_title(name)
 
+        # Ground truth çizimi
         for cs in gt_df['callsign'].unique() if 'callsign' in gt_df.columns else gt_df['target'].unique():
             sub = gt_df[gt_df.get('callsign', gt_df.get('target')) == cs].sort_values('time')
             ax.plot(sub['x'], sub['y'], 'k--', linewidth=2, alpha=0.6)
 
+        # Füzyon sonuçları çizimi
         if not df.empty and 'global_track_id' in df.columns:
             for tid in df['global_track_id'].unique():
                 tdf = df[df['global_track_id'] == tid].sort_values('time')

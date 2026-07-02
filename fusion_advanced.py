@@ -75,10 +75,22 @@ def _ci_fuse(x1, P1, x2, P2):
     Pf = 0.5 * (Pf + Pf.T)
     xf = Pf @ (omega * P1i @ x1 + (1 - omega) * P2i @ x2)
     return xf, Pf
+def _standard_fuse(x1, P1, x2, P2):
+    """Standart Kalman (LMMSE) Güncellemesi. Hataların bağımsız olduğunu varsayar."""
+    try:
+        S = P1 + P2
+        S_inv = np.linalg.inv(S)
+        K = P1 @ S_inv
+        xf = x1 + K @ (x2 - x1)
+        Pf = P1 - K @ P1
+        Pf = 0.5 * (Pf + Pf.T) # Simetriyi koru
+        return xf, Pf
+    except np.linalg.LinAlgError:
+        return x1, P1
 
 class GlobalTrack:
     _cnt = 0
-    def __init__(self, t, state, cov, tq, src):
+    def __init__(self, t, state, cov, tq, src, use_ci=True):
         GlobalTrack._cnt += 1
         self.id = f"GT-{GlobalTrack._cnt:04d}"
         self.time = t
@@ -88,6 +100,7 @@ class GlobalTrack:
         self.existence_prob = 0.1 + 0.7 * ((tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
         self.status = "TENTATIVE"
         self.sources: set = {src}
+        self.use_ci = use_ci # Parametreyi kaydet
 
     def propagate(self, t):
         dt = t - self.time
@@ -105,7 +118,10 @@ class GlobalTrack:
         self._update_status()
 
     def update(self, meas_state, meas_cov, tq, src):
-        xf, Pf = _ci_fuse(self.state, self.cov, meas_state, meas_cov)
+        if self.use_ci:
+            xf, Pf = _ci_fuse(self.state, self.cov, meas_state, meas_cov)
+        else:
+            xf, Pf = _standard_fuse(self.state, self.cov, meas_state, meas_cov)
         self.state, self.cov = xf, Pf
         self.last_update = self.time
         mp = 0.5 + 0.45 * ((tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
@@ -122,9 +138,10 @@ class GlobalTrack:
             self.status = "TENTATIVE"
 
 class FusionCenter:
-    def __init__(self):
+    def __init__(self, use_ci=True):
         self.tracks: List[GlobalTrack] = []
         self.src_map: Dict[Tuple, str] = {}  
+        self.use_ci = use_ci
 
     def process_batch(self, t, measurements):
         for gt in self.tracks: gt.propagate(t)
@@ -185,10 +202,9 @@ class FusionCenter:
                     matched_gt.add(gi); matched_m.add(mi)
         for mi, m in enumerate(measurements):
             if mi in matched_m: continue
-            ng = GlobalTrack(t, m["state"], m["cov"], m["tq"], m["src"])
+            ng = GlobalTrack(t, m["state"], m["cov"], m["tq"], m["src"], use_ci=self.use_ci)
             self.tracks.append(ng)
             self.src_map[m["src"]] = ng.id
-
 # ===========================================================================
 # ANA YURUTME
 # ===========================================================================
@@ -196,15 +212,17 @@ def run_advanced_fusion(
     sensor_csv=SENSOR_CSV,
     output_csv=OUTPUT_FUSED_CSV,
     verbose=True,
+    use_ci=True,
 ) -> pd.DataFrame:
     if verbose:
-        print(f"Covariance Intersection füzyon çalıştırılıyor: {sensor_csv}")
+        mode_str = "Covariance Intersection (CI)" if use_ci else "Standard LMMSE (No-CI)"
+        print(f"{mode_str} füzyon çalıştırılıyor: {sensor_csv}")
 
     sensor_df = pd.read_csv(sensor_csv)
     fusion_input = sensor_df[sensor_df["is_clutter"] != True].copy() if "is_clutter" in sensor_df.columns else sensor_df.copy()
 
     GlobalTrack._cnt = 0
-    fc = FusionCenter()
+    fc = FusionCenter(use_ci=use_ci)
     output_records = []
 
     for t_val, group in fusion_input.groupby("time", sort=True):
