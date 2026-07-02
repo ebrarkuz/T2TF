@@ -1,32 +1,41 @@
 import pandas as pd
+import numpy as np
 
 # 1. Mevcut tek uçaklı veriyi oku
 df1 = pd.read_csv("ground_truth_adsb.csv")
 
-# 2. İkinci uçak için verinin kopyasını oluştur
+# 2. İkinci uçak için verinin kopyasını oluştur (Aynalanmış Rota)
 df2 = df1.copy()
-
-# 3. İkinci uçağın adını (callsign) değiştir
-# Mevcut uçağınızın adı örneğin 'UCAK_1' ise, bunu 'UCAK_2' yapıyoruz.
 df2["callsign"] = "HEDEF_2" 
 
-# 4. Rota Kesişimi Yaratmak (Mirroring / Aynalama)
-# Uçağın X eksenindeki hareketini tersine çevirerek "kafa kafaya" veya "çapraz"
-# kesişmelerini sağlayabiliriz.
-merkez_x = df1["x"].mean()
-
 # X konumunu merkeze göre ayna görüntüsü al (tam tersi yönden gelsin)
+merkez_x = df1["x"].mean()
 df2["x"] = merkez_x - (df1["x"] - merkez_x)
-
-# X konumu tersine döndüğü için, X yönündeki hızını (vx) da tersine çevirmeliyiz
+# X konumu tersine döndüğü için, X yönündeki hızını (vx) da tersine çevir
 df2["vx"] = -df1["vx"]
 
-# Y eksenine de hafif bir kayma (offset) ekleyebilirsiniz (isteğe bağlı)
-# df2["y"] = df2["y"] + 2000  # 2 km paralel kaydırma gibi
+# 3. Üçüncü uçak için verinin kopyasını oluştur (Non-lineer / Sinüzoidal Rota)
+df3 = df1.copy()
+df3["callsign"] = "HEDEF_3_MANEVRA"
 
-# 5. İki uçağın verilerini birleştir ve zamana göre sırala
-df_multi = pd.concat([df1, df2]).sort_values("time").reset_index(drop=True)
+# Dalga frekansını belirlemek için zamanı sıfırdan başlatalım
+t_norm = df3["time"] - df3["time"].min()
 
-# 6. Yeni zorlu verisetini kaydet
+# Y ekseninde mevcut rotanın tersine uçsun (dik kesişme ihtimalini artırır)
+merkez_y = df1["y"].mean()
+df3["y"] = merkez_y - (df1["y"] - merkez_y)
+df3["vy"] = -df1["vy"]
+
+# X ekseninde orijinal rotaya 15 km genliğinde bir sinüs dalgası ekleyerek non-lineer (kıvrımlı) yapalım
+# Bölünen sayı (örneğin 25.0) dalganın ne kadar sık olacağını belirler
+df3["x"] = df1["x"] + np.sin(t_norm / 25.0) * 15000
+
+# Hız (vx) değerini de x'in zamana göre türevini (kosinüs) alarak fiziksel kurallara uygun güncelleyelim
+df3["vx"] = df1["vx"] + np.cos(t_norm / 25.0) * (15000 / 25.0)
+
+# 4. Üç uçağın verilerini birleştir ve zamana göre sırala
+df_multi = pd.concat([df1, df2, df3]).sort_values("time").reset_index(drop=True)
+
+# 5. Yeni zorlu verisetini kaydet
 df_multi.to_csv("ground_truth_adsb_multi.csv", index=False)
-print("Çoklu hedef verisi başarıyla oluşturuldu: ground_truth_adsb_multi.csv")
+print("Çoklu hedef verisi başarıyla oluşturuldu: ground_truth_adsb_multi.csv (3 Hedef)")

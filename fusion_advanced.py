@@ -154,7 +154,8 @@ class FusionCenter:
         r_gt = [i for i in range(len(self.tracks)) if i not in matched_gt]
         r_m  = [i for i in range(len(measurements)) if i not in matched_m]
         if r_gt and r_m:
-            cost = np.full((len(r_gt), len(r_m)), np.inf)
+            # DÜZELTME 1: np.inf yerine çok büyük bir rakam (1e9) veriyoruz
+            cost = np.full((len(r_gt), len(r_m)), 1e9) 
             for ri, gi in enumerate(r_gt):
                 gt = self.tracks[gi]
                 for ci, mi in enumerate(r_m):
@@ -170,16 +171,18 @@ class FusionCenter:
                     except np.linalg.LinAlgError:
                         pass
 
-            if not np.all(np.isinf(cost)):
+            # DÜZELTME 2: np.isinf yerine 1e9 kontrolü yapıyoruz
+            if not np.all(cost == 1e9):
                 for ri, ci in zip(*linear_sum_assignment(cost)):
-                    if cost[ri, ci] == np.inf: continue
+                    # DÜZELTME 3: np.inf kontrolü yerine ceza limiti kontrolü yapıyoruz
+                    if cost[ri, ci] >= 1e9: continue 
+                    
                     gi, mi = r_gt[ri], r_m[ci]
                     gt = self.tracks[gi]
                     m = measurements[mi]
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
                     self.src_map[m["src"]] = gt.id
                     matched_gt.add(gi); matched_m.add(mi)
-
         for mi, m in enumerate(measurements):
             if mi in matched_m: continue
             ng = GlobalTrack(t, m["state"], m["cov"], m["tq"], m["src"])
