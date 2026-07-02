@@ -450,19 +450,15 @@ def simulate_radar_gercekci(radar, gt_df):
 # ANA YURUTME
 # ===========================================================================
 
-if __name__ == "__main__":
-    print(f"Ground Truth dosyasi okunuyor: {GROUND_TRUTH_CSV}")
-    try:
-        gt_df = pd.read_csv(GROUND_TRUTH_CSV)
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"'{GROUND_TRUTH_CSV}' bulunamadi. Ayni dizinde olduguna emin olun."
-        )
+def generate_sensor_csvs(
+    gt_csv: str = GROUND_TRUTH_CSV,
+    idealize_csv: str = SENSOR_TRACKS_IDEALIZE_CSV,
+    gercekci_csv: str = SENSOR_TRACKS_GERCEKCI_CSV,
+):
+    print(f"Ground Truth dosyasi okunuyor: {gt_csv}")
+    gt_df = pd.read_csv(gt_csv)
     print(f"   -> {len(gt_df)} satir yuklendi.\n")
 
-    # ------------------------------------------------------------------
-    # 1) IDEALIZE CSV
-    # ------------------------------------------------------------------
     print("=" * 55)
     print("IDEALIZE SIMULASYON (orijinal, degistirilmemis mantik)")
     print("=" * 55)
@@ -476,13 +472,10 @@ if __name__ == "__main__":
 
     sensor_idealize = (pd.concat(all_idealize, ignore_index=True)
                          .sort_values("time").reset_index(drop=True))
-    sensor_idealize.to_csv(SENSOR_TRACKS_IDEALIZE_CSV, index=False)
-    print(f"\n  -> '{SENSOR_TRACKS_IDEALIZE_CSV}' kaydedildi "
+    sensor_idealize.to_csv(idealize_csv, index=False)
+    print(f"\n  -> '{idealize_csv}' kaydedildi "
           f"({len(sensor_idealize)} toplam kayit)\n")
 
-    # ------------------------------------------------------------------
-    # 2) GERCEKCI CSV
-    # ------------------------------------------------------------------
     print("=" * 55)
     print("GERCEKCI SIMULASYON (YEN1-YEN4 iyilestirmeleri)")
     print("=" * 55)
@@ -497,24 +490,12 @@ if __name__ == "__main__":
 
     sensor_gercekci = (pd.concat(all_gercekci, ignore_index=True)
                          .sort_values("time").reset_index(drop=True))
-    sensor_gercekci.to_csv(SENSOR_TRACKS_GERCEKCI_CSV, index=False)
-    print(f"\n  -> '{SENSOR_TRACKS_GERCEKCI_CSV}' kaydedildi "
+    sensor_gercekci.to_csv(gercekci_csv, index=False)
+    print(f"\n  -> '{gercekci_csv}' kaydedildi "
           f"({len(sensor_gercekci)} toplam kayit)\n")
 
-    # ------------------------------------------------------------------
-    # KISA KARSILASTIRMA OZETI
-    # ------------------------------------------------------------------
-    print("=" * 55)
-    print("OZET KARSILASTIRMA")
-    print("=" * 55)
+    return idealize_csv, gercekci_csv
 
-    for label, df in [("IDEALIZE", sensor_idealize), ("GERCEKCI", sensor_gercekci)]:
-        gercek = df[df["is_clutter"] == False]
-        clutter = df[df["is_clutter"] == True]
-        print(f"\n{label}:")
-        print(f"  Toplam kayit      : {len(df)}")
-        print(f"  Gercek tespit     : {len(gercek)}")
-        print(f"  Clutter           : {len(clutter)}")
-        print(f"  Ort. sigma_pos_m  : {gercek['sigma_pos_m'].mean():.1f} m")
-        print(f"  Track ID sayisi   : {gercek['local_track_id'].nunique()} "
-              f"(fazlasi = daha cok track drop)")
+
+if __name__ == "__main__":
+    generate_sensor_csvs()

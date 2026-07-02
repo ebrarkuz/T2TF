@@ -25,6 +25,7 @@ COAST_TIME_LIMIT = 30.0
 TQ_MIN, TQ_MAX = 1, 15
 SIGMA_POS_MAX, SIGMA_POS_MIN = 1500.0, 30.0
 SIGMA_VEL_MAX, SIGMA_VEL_MIN = 25.0, 0.5
+SENSOR_CSV = "radar_sensor_tracks.csv"
 OUTPUT_FUSED_CSV = "fused_tracks.csv"
 
 # ===========================================================================
@@ -188,17 +189,18 @@ class FusionCenter:
 # ===========================================================================
 # ANA YURUTME
 # ===========================================================================
-if __name__ == "__main__":
-    print("radar_sensor_tracks.csv yukleniyor...")
-    try:
-        sensor_df = pd.read_csv("radar_sensor_tracks.csv")
-    except FileNotFoundError:
-        raise FileNotFoundError("CSV dosyalari bulunamadi. Lutfen radar_sensor_tracks.csv dosyasini kontrol edin.")
+def run_advanced_fusion(
+    sensor_csv=SENSOR_CSV,
+    output_csv=OUTPUT_FUSED_CSV,
+    verbose=True,
+) -> pd.DataFrame:
+    if verbose:
+        print(f"Covariance Intersection füzyon çalıştırılıyor: {sensor_csv}")
 
-    print("Covariance Intersection fuzyon calistiriliyor...")
+    sensor_df = pd.read_csv(sensor_csv)
     fusion_input = sensor_df[sensor_df["is_clutter"] != True].copy() if "is_clutter" in sensor_df.columns else sensor_df.copy()
-    
-    GlobalTrack._cnt = 0   
+
+    GlobalTrack._cnt = 0
     fc = FusionCenter()
     output_records = []
 
@@ -223,20 +225,34 @@ if __name__ == "__main__":
                 sigma_y = math.sqrt(max(float(gt.cov[2, 2]), 1e-6))
                 sigma_vy = math.sqrt(max(float(gt.cov[3, 3]), 1e-6))
                 output_records.append({
-                    "time": t_val, "global_track_id": gt.id,
-                    "x": float(gt.state[0, 0]), "y": float(gt.state[2, 0]),
-                    "vx": float(gt.state[1, 0]), "vy": float(gt.state[3, 0]),
-                    "pos_sigma_m": sigma_x, "vel_sigma_mps": sigma_vx,
-                    "sigma_x_m": sigma_x, "sigma_vx_mps": sigma_vx,
-                    "sigma_y_m": sigma_y, "sigma_vy_mps": sigma_vy,
+                    "time": t_val,
+                    "global_track_id": gt.id,
+                    "x": float(gt.state[0, 0]),
+                    "y": float(gt.state[2, 0]),
+                    "vx": float(gt.state[1, 0]),
+                    "vy": float(gt.state[3, 0]),
+                    "pos_sigma_m": sigma_x,
+                    "vel_sigma_mps": sigma_vx,
+                    "sigma_x_m": sigma_x,
+                    "sigma_vx_mps": sigma_vx,
+                    "sigma_y_m": sigma_y,
+                    "sigma_vy_mps": sigma_vy,
                     "fused_tq": sigma_pos_to_tq(sigma_x),
-                    "prob": round(gt.existence_prob, 3), "n_sources": len(gt.sources),
+                    "prob": round(gt.existence_prob, 3),
+                    "n_sources": len(gt.sources),
                 })
 
     fused_df = pd.DataFrame(output_records)
-    fused_df.to_csv(OUTPUT_FUSED_CSV, index=False)
-    if not fused_df.empty:
-        print(f"Füzyon tamamlandi. {len(fused_df)} CONFIRMED kayit bulundu.")
-    else:
-        print(f"[!] Hic CONFIRMED track olusturulamadi. Bos CSV olusturuldu: {OUTPUT_FUSED_CSV}")
-        print("Parametreleri kontrol edin.")
+    fused_df.to_csv(output_csv, index=False)
+    if verbose:
+        if not fused_df.empty:
+            print(f"Füzyon tamamlandı. {len(fused_df)} CONFIRMED kayıt bulundu.")
+        else:
+            print(f"[!] Hiç CONFIRMED track oluşamadı. Boş CSV oluşturuldu: {output_csv}")
+        print(f"Çıktı dosyası: {output_csv}")
+
+    return fused_df
+
+
+if __name__ == "__main__":
+    run_advanced_fusion()

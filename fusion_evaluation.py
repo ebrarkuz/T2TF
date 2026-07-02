@@ -11,26 +11,31 @@ OUTPUT_BASIC_CSV = "basic_fusion_sonuclari.csv"
 SENSOR_CSV = "radar_sensor_tracks.csv"
 
 
-def load_data():
-    gt_path = next((p for p in GT_CSV_CANDIDATES if os.path.exists(p)), None)
+def load_data(
+    gt_csv=None,
+    sensor_csv=SENSOR_CSV,
+    fused_csv=OUTPUT_FUSED_CSV,
+    basic_csv=OUTPUT_BASIC_CSV,
+):
+    gt_path = gt_csv or next((p for p in GT_CSV_CANDIDATES if os.path.exists(p)), None)
     if gt_path is None:
         raise FileNotFoundError(
             "Ground truth CSV dosyasi bulunamadi. Lutfen ground_truth_adsb.csv veya ground_truth_adsb4.csv adli dosyayi klasore koyun."
         )
     gt_df = pd.read_csv(gt_path)
-    sensor_df = pd.read_csv(SENSOR_CSV)
+    sensor_df = pd.read_csv(sensor_csv)
     
     # Füzyon sonuçlarını yükle (Hata yönetimi ile)
     try:
-        fused_df = pd.read_csv(OUTPUT_FUSED_CSV)
+        fused_df = pd.read_csv(fused_csv)
     except FileNotFoundError:
-        print(f"UYARI: {OUTPUT_FUSED_CSV} bulunamadı. Boş veri çerçevesi oluşturuluyor.")
+        print(f"UYARI: {fused_csv} bulunamadı. Boş veri çerçevesi oluşturuluyor.")
         fused_df = pd.DataFrame()
 
     try:
-        basic_df = pd.read_csv(OUTPUT_BASIC_CSV)
+        basic_df = pd.read_csv(basic_csv)
     except FileNotFoundError:
-        print(f"UYARI: {OUTPUT_BASIC_CSV} bulunamadı. Boş veri çerçevesi oluşturuluyor.")
+        print(f"UYARI: {basic_csv} bulunamadı. Boş veri çerçevesi oluşturuluyor.")
         basic_df = pd.DataFrame()
 
     return gt_df, sensor_df, fused_df, basic_df

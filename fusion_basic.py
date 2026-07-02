@@ -174,34 +174,31 @@ class FusionCenter:
 # ---------------------------------------------------------
 # 4. SİMÜLASYONU ÇALIŞTIRMA
 # ---------------------------------------------------------
-if __name__ == "__main__":
-    # Önceki aşamada oluşturduğumuz zorlu veriyi yükle
-    try:
-        df = pd.read_csv("radar_sensor_tracks.csv")
-    except FileNotFoundError:
-        print("HATA: 'link16_sensor_tracks_hard.csv' dosyası bulunamadı. Lütfen önce veri üretim kodunu çalıştırın.")
-        exit()
 
-    # Zaman damgasına göre asenkron akışı sağla
+def run_basic_fusion(
+    sensor_csv: str = "radar_sensor_tracks.csv",
+    output_csv: str = "basic_fusion_sonuclari.csv",
+    verbose: bool = True,
+) -> pd.DataFrame:
+    if verbose:
+        print(f"Temel füzyon çalıştırılıyor: {sensor_csv}")
+
+    df = pd.read_csv(sensor_csv)
     df = df.sort_values("time").reset_index(drop=True)
-    
+
+    GlobalTrack._id_counter = 0
     fusion_center = FusionCenter()
-    
     output_records = []
 
-    print("Asenkron sensör verileri işleniyor...")
+    if verbose:
+        print("Asenkron sensör verileri işleniyor...")
+
     for idx, row in df.iterrows():
         t = row["time"]
-        
-        # Local state vektörü
         local_state = np.array([row["x"], row["vx"], row["y"], row["vy"]]).reshape(4, 1)
-        
-        # TQ'dan hesaplanmış lokal ölçüm kovaryansı
         local_cov = tq_to_cov(row["track_quality"])
-        
         fusion_center.process_measurement(t, local_state, local_cov, row["track_quality"])
-        
-        # Her 10 saniyede bir CONFIRMED track'lerin durumunu kaydet (Uygulamaya gönderilen çıktı)
+
         if idx % 50 == 0:
             for gt in fusion_center.global_tracks:
                 if gt.state_status == "CONFIRMED":
@@ -216,10 +213,15 @@ if __name__ == "__main__":
                     })
 
     fused_df = pd.DataFrame(output_records)
-    if not fused_df.empty:
-        print(f"\nFüzyon tamamlandı. {len(fused_df)} adet CONFIRMED global track kaydı oluşturuldu.")
-        print("Örnek Çıktı:")
-        print(fused_df.tail(10).to_string(index=False))
-        fused_df.to_csv("basic_fusion_sonuclari.csv", index=False)
-    else:
-        print("\nHiç CONFIRMED track oluşmadı (Eşikler çok yüksek veya veri gürültüsü çok fazla olabilir).")
+    fused_df.to_csv(output_csv, index=False)
+
+    if verbose:
+        if not fused_df.empty:
+            print(f"\nTemel füzyon tamamlandı. {len(fused_df)} adet CONFIRMED global track kaydı oluşturuldu.")
+            print("Örnek Çıktı:")
+            print(fused_df.tail(10).to_string(index=False))
+        else:
+            print("\nHiç CONFIRMED track oluşmadı (Eşikler çok yüksek veya veri gürültüsü çok fazla olabilir).")
+        print(f"Çıktı dosyası: {output_csv}")
+
+    return fused_df
