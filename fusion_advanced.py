@@ -100,6 +100,8 @@ class GlobalTrack:
         self.existence_prob = 0.1 + 0.7 * ((tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
         self.status = "TENTATIVE"
         self.sources: set = {src}
+        self.source_radar_names: set = {src[0] if isinstance(src, tuple) else src}
+        self.source_measurement_details: set = {f"{src[0] if isinstance(src, tuple) else src}@{t:.2f}"}
         self.use_ci = use_ci # Parametreyi kaydet
 
     def propagate(self, t):
@@ -127,6 +129,8 @@ class GlobalTrack:
         mp = 0.5 + 0.45 * ((tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
         self.existence_prob = self.existence_prob + (1 - self.existence_prob) * mp
         self.sources.add(src)
+        self.source_radar_names.add(src[0] if isinstance(src, tuple) else src)
+        self.source_measurement_details.add(f"{src[0] if isinstance(src, tuple) else src}@{self.time:.2f}")
         self._update_status()
 
     def _update_status(self):
@@ -245,6 +249,7 @@ def run_advanced_fusion(
                 sigma_vx = math.sqrt(max(float(gt.cov[1, 1]), 1e-6))
                 sigma_y = math.sqrt(max(float(gt.cov[2, 2]), 1e-6))
                 sigma_vy = math.sqrt(max(float(gt.cov[3, 3]), 1e-6))
+                source_names = ", ".join(sorted(gt.source_radar_names))
                 output_records.append({
                     "time": t_val,
                     "global_track_id": gt.id,
@@ -260,7 +265,9 @@ def run_advanced_fusion(
                     "sigma_vy_mps": sigma_vy,
                     "fused_tq": sigma_pos_to_tq(sigma_x),
                     "prob": round(gt.existence_prob, 3),
-                    "n_sources": len(gt.sources),
+                    "n_sources": len(gt.source_radar_names),
+                    "source_radars": source_names,
+                    "source_measurement_details": "; ".join(sorted(gt.source_measurement_details)),
                 })
 
     fused_df = pd.DataFrame(output_records)
