@@ -21,6 +21,9 @@ warnings.filterwarnings("ignore")
 PROCESS_NOISE_INTENSITY = 1.5
 GATE_CHI2_4DOF = 18.47   
 COAST_TIME_LIMIT = 30.0
+CONFIRM_HITS = 2                # minimum number of updates before a track can be CONFIRMED
+DUPLICATE_DIST_M = 50.0         # if a track appears twice within this distance and short time, treat as spurious
+DUPLICATE_TIME_S = 5.0          # time window for duplicate appearance check (seconds)
 
 TQ_MIN, TQ_MAX = 1, 15
 SIGMA_POS_MAX, SIGMA_POS_MIN = 1500.0, 30.0
@@ -102,6 +105,11 @@ class GlobalTrack:
         self.sources: set = {src}
         self.source_radar_names: set = {src[0] if isinstance(src, tuple) else src}
         self.source_measurement_details: set = {f"{src[0] if isinstance(src, tuple) else src}@{t:.2f}"}
+        # Track bookkeeping
+        self.hits_count = 1
+        self.creation_time = t
+        # store (x,y,time) history for duplicate detection
+        self.position_history = [(float(self.state[0,0]), float(self.state[2,0]), float(t))]
         self.use_ci = use_ci # Parametreyi kaydet
 
     def propagate(self, t):
@@ -131,12 +139,17 @@ class GlobalTrack:
         self.sources.add(src)
         self.source_radar_names.add(src[0] if isinstance(src, tuple) else src)
         self.source_measurement_details.add(f"{src[0] if isinstance(src, tuple) else src}@{self.time:.2f}")
+        # bookkeeping
+        self.hits_count += 1
+        self.position_history.append((float(self.state[0,0]), float(self.state[2,0]), float(self.time)))
         self._update_status()
 
     def _update_status(self):
+        # Deleted if coasted out or very low existence probability
         if (self.time - self.last_update) > COAST_TIME_LIMIT or self.existence_prob < 0.2:
             self.status = "DELETED"
-        elif self.existence_prob > 0.85:
+        # Only confirm if existence probability is high AND we have enough update hits
+        elif self.existence_prob > 0.85 and self.hits_count >= CONFIRM_HITS:
             self.status = "CONFIRMED"
         else:
             self.status = "TENTATIVE"
@@ -223,8 +236,7 @@ def run_advanced_fusion(
         print(f"{mode_str} füzyon çalıştırılıyor: {sensor_csv}")
 
     sensor_df = pd.read_csv(sensor_csv)
-    fusion_input = sensor_df[sensor_df["is_clutter"] != True].copy() if "is_clutter" in sensor_df.columns else sensor_df.copy()
-
+    fusion_input = sensor_df.copy()
     GlobalTrack._cnt = 0
     fc = FusionCenter(use_ci=use_ci)
     output_records = []
@@ -245,6 +257,15 @@ def run_advanced_fusion(
 
         for gt in fc.tracks:
             if gt.status == "CONFIRMED":
+                # eliminate short spurious tracks that appear twice in nearby positions quickly
+                if hasattr(gt, 'position_history') and len(gt.position_history) >= 2:
+                    x1, y1, t1 = gt.position_history[-1]
+                    x0, y0, t0 = gt.position_history[-2]
+                    dt_hist = float(t1) - float(t0)
+                    dist_hist = math.hypot(x1 - x0, y1 - y0)
+                    if dt_hist <= DUPLICATE_TIME_S and dist_hist <= DUPLICATE_DIST_M and gt.hits_count < (CONFIRM_HITS + 1):
+                        gt.status = "DELETED"
+                        continue
                 sigma_x = math.sqrt(max(float(gt.cov[0, 0]), 1e-6))
                 sigma_vx = math.sqrt(max(float(gt.cov[1, 1]), 1e-6))
                 sigma_y = math.sqrt(max(float(gt.cov[2, 2]), 1e-6))

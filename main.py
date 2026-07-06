@@ -1,6 +1,5 @@
 import os
 import pandas as pd
-import matplotlib.pyplot as plt
 
 from fusion_advanced import run_advanced_fusion
 from fusion_basic import run_basic_fusion
@@ -9,7 +8,7 @@ from radar_sim import generate_sensor_csvs
 
 # ==========================================
 # KONFİGÜRASYON
-# ==========================================
+# =========================================
 GROUND_TRUTH_CSV = "ground_truth_adsb_multi.csv"
 IDEALIZE_SENSOR_CSV = "radar_sensor_tracks_idealize.csv"
 GERCEKCI_SENSOR_CSV = "radar_sensor_tracks_gercekci.csv"
@@ -19,118 +18,74 @@ RES_IDEAL_BASIC = "res_ideal_basic.csv"
 RES_IDEAL_ADV = "res_ideal_adv.csv"
 RES_REAL_BASIC = "res_real_basic.csv"
 RES_REAL_ADV = "res_real_adv.csv"
-RES_REAL_ADV_NOCI = "res_real_adv_noci.csv"  # YENİ: CI Olmayan Senaryo
+RES_REAL_ADV_NOCI = "res_real_adv_noci.csv"
 
 
-def main():
-    print("=" * 70)
-    print("RADAR FÜZYON BÜTÜNLEŞİK TEST ORKESTRASYONU (5 SENARYO)")
-    print("=" * 70)
-
-    print("\n[AŞAMA 1] Simülasyon Verileri Üretiliyor...")
+def step1_generate_data():
+    """Ground truth verisinden radar simülasyon verileri üretir."""
+    print("\n[AŞAMA 1] Simülasyon verileri üretiliyor...")
     generate_sensor_csvs(
         gt_csv=GROUND_TRUTH_CSV,
         idealize_csv=IDEALIZE_SENSOR_CSV,
         gercekci_csv=GERCEKCI_SENSOR_CSV,
     )
 
-    print("\n[AŞAMA 2] İdealize Radar Senaryosu Koşuluyor...")
-    run_basic_fusion(sensor_csv=IDEALIZE_SENSOR_CSV, output_csv=RES_IDEAL_BASIC)
-    run_advanced_fusion(sensor_csv=IDEALIZE_SENSOR_CSV, output_csv=RES_IDEAL_ADV, use_ci=True)
 
-    print("\n[AŞAMA 3] Gerçekçi Radar Senaryosu Koşuluyor...")
-    run_basic_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_BASIC)
-    
-    # CI Açık (Orijinal Covariance Intersection)
-    run_advanced_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_ADV, use_ci=True)
-    
-    # CI Kapalı (Sadece Standart LMMSE Kalman)
-    run_advanced_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_ADV_NOCI, use_ci=False)
+def step2_run_scenarios():
+    """Temel ve gelişmiş füzyon senaryolarını çalıştırır."""
+    print("\n[AŞAMA 2] Füzyon senaryoları çalıştırılıyor...")
 
-    print("\n[AŞAMA 4] Metrikler Hesaplanıyor ve Karşılaştırılıyor...")
-    try:
-        gt_df = pd.read_csv(GROUND_TRUTH_CSV)
-    except FileNotFoundError:
-        print(f"HATA: {GROUND_TRUTH_CSV} bulunamadı.")
-        return
+    run_basic_fusion(sensor_csv=IDEALIZE_SENSOR_CSV, output_csv=RES_IDEAL_BASIC, verbose=False)
+    run_advanced_fusion(sensor_csv=IDEALIZE_SENSOR_CSV, output_csv=RES_IDEAL_ADV, use_ci=True, verbose=False)
 
-    # Sözlüğe 5. Senaryoyu Ekledik
+    run_basic_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_BASIC, verbose=False)
+    run_advanced_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_ADV, use_ci=True, verbose=False)
+    run_advanced_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_ADV_NOCI, use_ci=False, verbose=False)
+
+
+def _safe_read_csv(path):
+    return pd.read_csv(path) if os.path.exists(path) else pd.DataFrame()
+
+
+def step3_compute_metrics():
+    """Metrikleri hesaplar ve tablo halinde ekrana basar."""
+    print("\n[AŞAMA 3] Metrikler hesaplanıyor...")
+
+    if not os.path.exists(GROUND_TRUTH_CSV):
+        raise FileNotFoundError(f"Ground truth dosyası bulunamadı: {GROUND_TRUTH_CSV}")
+
+    gt_df = pd.read_csv(GROUND_TRUTH_CSV)
     dfs = {
-        "İdealize + Temel": pd.read_csv(RES_IDEAL_BASIC) if os.path.exists(RES_IDEAL_BASIC) else pd.DataFrame(),
-        "İdealize + Gelişmiş (CI)": pd.read_csv(RES_IDEAL_ADV) if os.path.exists(RES_IDEAL_ADV) else pd.DataFrame(),
-        "Gerçekçi + Temel": pd.read_csv(RES_REAL_BASIC) if os.path.exists(RES_REAL_BASIC) else pd.DataFrame(),
-        "Gerçekçi + Gelişmiş (CI)": pd.read_csv(RES_REAL_ADV) if os.path.exists(RES_REAL_ADV) else pd.DataFrame(),
-        "Gerçekçi + Gelişmiş (No-CI)": pd.read_csv(RES_REAL_ADV_NOCI) if os.path.exists(RES_REAL_ADV_NOCI) else pd.DataFrame(),
+        "İdealize + Temel": _safe_read_csv(RES_IDEAL_BASIC),
+        "İdealize + Gelişmiş (CI)": _safe_read_csv(RES_IDEAL_ADV),
+        "Gerçekçi + Temel": _safe_read_csv(RES_REAL_BASIC),
+        "Gerçekçi + Gelişmiş (CI)": _safe_read_csv(RES_REAL_ADV),
+        "Gerçekçi + Gelişmiş (No-CI)": _safe_read_csv(RES_REAL_ADV_NOCI),
     }
 
     metrics = {name: compute_tracking_metrics(gt_df, df) for name, df in dfs.items()}
-
     comp_df = pd.DataFrame(metrics).T
-    comp_df = comp_df[['precision', 'recall', 'f1_score', 'mota', 'id_switches', 'rmse_pos_m', 'rmse_vel_mps', 'nees']]
-    comp_df.columns = ['Precision', 'Recall', 'F1 Score', 'MOTA', 'ID Switch', 'RMSE Pos', 'RMSE Vel', 'NEES']
+    comp_df = comp_df[["precision", "recall", "f1_score", "mota", "id_switches", "rmse_pos_m", "rmse_vel_mps", "nees"]]
+    comp_df.columns = ["Precision", "Recall", "F1 Score", "MOTA", "ID Switch", "RMSE Pos", "RMSE Vel", "NEES"]
 
     print("\n" + "=" * 90)
-    print("5'Lİ KOMBİNASYON METRİK KARŞILAŞTIRMASI".center(90))    
+    print("Füzyon kombinasyonları metrik tablosu".center(90))
     print("=" * 90)
     print(comp_df.round(3).to_string())
     print("=" * 90)
 
-    # 5 Grafik çizeceğimiz için 2x3 ızgara oluşturuyoruz
-    fig, axes = plt.subplots(2, 3, figsize=(24, 12))
-    fig.suptitle("Füzyon Algoritmaları Tüm Senaryolar XY Konum Karşılaştırması", fontsize=18, fontweight="bold")
+    return comp_df
 
-    # Matrisin sağ üst köşesini (0, 2) boş bırakıp gizliyoruz ki estetik dursun
-    fig.delaxes(axes[0, 2])
 
-    # 5 Senaryonun yerleşim koordinatları
-    plot_coords = [(0, 0), (0, 1), (1, 0), (1, 1), (1, 2)]
-    
-    for (name, df), (row, col) in zip(dfs.items(), plot_coords):
-        ax = axes[row, col]
-        ax.set_title(name)
+def main():
+    print("=" * 70)
+    print("RADAR FÜZYON - METRİK TABLOSU".center(70))
+    print("=" * 70)
 
-        # Ground truth çizimi
-        for cs in gt_df['callsign'].unique() if 'callsign' in gt_df.columns else gt_df['target'].unique():
-            sub = gt_df[gt_df.get('callsign', gt_df.get('target')) == cs].sort_values('time')
-            ax.plot(sub['x'], sub['y'], 'k--', linewidth=2, alpha=0.6)
-
-        # Ham sensör track'leri (radar bazında, ince çizgiyle)
-        sensor_csv = IDEALIZE_SENSOR_CSV if 'İdealize' in name else GERCEKCI_SENSOR_CSV
-        try:
-            sensor_df = pd.read_csv(sensor_csv)
-        except Exception:
-            sensor_df = pd.DataFrame()
-
-        if not sensor_df.empty and 'sensor' in sensor_df.columns and 'local_track_id' in sensor_df.columns:
-            for i, (sensor_name, group) in enumerate(sensor_df.groupby('sensor')):
-                color = f"C{(i + 2) % 10}"
-                first = True
-                for lt, g in group.groupby('local_track_id'):
-                    g = g.sort_values('time')
-                    if first:
-                        ax.plot(g['x'], g['y'], linewidth=1.0, alpha=0.45, color=color, label=sensor_name)
-                        first = False
-                    else:
-                        ax.plot(g['x'], g['y'], linewidth=0.8, alpha=0.18, color=color)
-
-        # Füzyon sonuçları çizimi
-        if not df.empty and 'global_track_id' in df.columns:
-            for tid in df['global_track_id'].unique():
-                tdf = df[df['global_track_id'] == tid].sort_values('time')
-                ax.plot(tdf['x'], tdf['y'], linewidth=2, label=f"GT {tid}")
-                ax.scatter(tdf['x'], tdf['y'], s=10)
-
-        ax.set_xlabel('x (m)')
-        ax.set_ylabel('y (m)')
-        ax.grid(True, alpha=0.3)
-        ax.set_aspect('equal', adjustable='datalim')
-        ax.legend(fontsize='small', loc='upper right')
-
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig('tum_senaryolar_xy.png', dpi=150)
-    print("\n-> Karşılaştırma grafiği 'tum_senaryolar_xy.png' olarak kaydedildi.")
-    plt.show()
+    step1_generate_data()
+    step2_run_scenarios()
+    step3_compute_metrics()
 
 
 if __name__ == '__main__':
-    main()
+    main()          

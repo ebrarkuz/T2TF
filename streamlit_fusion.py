@@ -89,6 +89,13 @@ def build_map_data(gt_df: pd.DataFrame, sensor_df: pd.DataFrame, fused_df: pd.Da
         if source_details == "nan" or source_details.strip() == "":
             source_details = source_radars
             
+        # DEVASA VERİ YÜKÜNÜ ENGELLEYEN YENİ KOD:
+        # Metin çok uzunsa (örneğin 100 karakteri geçiyorsa) sadece son kısımlarını göster
+        if len(source_details) > 100:
+            # Noktalı virgüllerden bölüp sadece son 3 güncellemeyi alıyoruz
+            meas_list = source_details.split(";")
+            source_details = "... " + ";".join(meas_list[-3:]) if len(meas_list) > 3 else source_details[:100] + "..."
+            
         # Prob (Olasılık) değeri için de güvenli erişim
         prob_val = float(row["prob"]) if "prob" in row else 0.0
 
