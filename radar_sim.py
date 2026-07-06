@@ -63,14 +63,15 @@ RADARS = [
         "bias_x":          15.0,
         "bias_y":         -10.0,
         "bias_drift_std":  0.05,        # [YEN4] her taramada bias'a eklenen std (m)
-        "clutter_rate":    1.5,
-        "n_static_clutter":8,           # [YEN3] sahnede kac adet statik clutter noktasi
+        "clutter_rate":    0.0020,
+        "n_static_clutter":2, 
+        "static_visible_prob": 0.05,          # [YEN3] sahnede kac adet statik clutter noktasi
         "pos_x":           0.0,
         "pos_y":           0.0,
         "max_range_m":     500000.0,
         "fov_center_deg":  None,
         "fov_half_deg":    180.0,
-        "clutter_box":     (-100000, 100000, -100000, 100000),
+        "clutter_box":    (-400000, 400000, -400000, 400000),
     },
     {
         "name":            "RADAR_B",
@@ -86,14 +87,15 @@ RADARS = [
         "bias_x":         -25.0,
         "bias_y":          20.0,
         "bias_drift_std":  0.08,        # [YEN4]
-        "clutter_rate":    2.5,
-        "n_static_clutter":12,          # [YEN3]
+        "clutter_rate":    0.0012,
+        "n_static_clutter":3,          # [YEN3]
+        "static_visible_prob": 0.10,          # [YEN3]
         "pos_x":           50000.0,
         "pos_y":          -5000.0,
         "max_range_m":     500000.0,
         "fov_center_deg":  None,
         "fov_half_deg":    180.0,
-        "clutter_box":     (-100000, 100000, -100000, 100000),
+        "clutter_box":    (-400000, 400000, -400000, 400000),
     },
     {
         "name":            "RADAR_C",
@@ -109,14 +111,17 @@ RADARS = [
         "bias_x":          40.0,
         "bias_y":          35.0,
         "bias_drift_std":  0.12,        # [YEN4]
-        "clutter_rate":    4.0,
-        "n_static_clutter":18,          # [YEN3]
+        "clutter_rate":    0.0008,
+        "n_static_clutter":1,  
+        "static_visible_prob": 0.05,                  # [YEN3] azaltildi — çok fazla statik clutteri engellemek icin
         "pos_x":           15000.0,
         "pos_y":           60000.0,
         "max_range_m":     500000.0,
         "fov_center_deg":  None,
         "fov_half_deg":    180.0,
         "clutter_box":     (-100000, 100000, -100000, 100000),
+        # Statik clutter her taramada mutlaka gorunmesin — olasilik ile belirsizlik ver
+        "static_visible_prob": 0.15,
     },
 ]
 
@@ -395,6 +400,9 @@ def simulate_radar_gercekci(radar, gt_df):
     # FOV disindakileri ele
     static_positions = [(cx, cy) for cx, cy in static_positions
                         if in_fov(radar, cx, cy)]
+    # Statik clutter her taramada mutlaka kaydedilirse sayi oldukca buyur.
+    # Burada her statik noktanin gorunme olasiligini ekleyerek toplam yükü azaltıyoruz.
+    static_vis_prob = radar.get("static_visible_prob", 1.0)
 
     t = np.random.uniform(0, radar["revisit_mean_s"])
     while t <= t_max:
@@ -424,7 +432,11 @@ def simulate_radar_gercekci(radar, gt_df):
             })
 
         # [YEN3] Statik clutter: ayni konumlar her taramada kucuk titresimle tekrar
+        # Ancak burada her pozisyonun gorunme olasiligini kontrol ederek toplam
+        # sayiyi dusuruyoruz (ortalama olarak static_vis_prob ile carpiliyor).
         for cx, cy in static_positions:
+            if np.random.rand() > static_vis_prob:
+                continue
             tq = int(np.clip(np.random.randint(1, 5), TQ_MIN, TQ_MAX))
             sp, sv = tq_to_sigma_pos(tq), tq_to_sigma_vel(tq)
             records.append({

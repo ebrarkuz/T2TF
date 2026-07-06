@@ -1,28 +1,31 @@
-## 4-Combination Performance Comparison- two target X 
+# Radar Fusion Project
 
-| Configuration | Precision | Recall | F1 Score | MOTA | ID Switch | RMSE Pos | RMSE Vel | NEES |
-|--------------|----------:|-------:|---------:|-----:|----------:|---------:|---------:|-----:|
-| Idealized + Baseline | 0.984 | 0.698 | 0.817 | 0.687 | 0 | 157.857 | 2.217 | 24923.800 |
-| Idealized + Advanced | 0.909 | 0.961 | 0.934 | 0.864 | 4 | 131.712 | 6.973 | 7.874 |
-| Realistic + Baseline | 0.066 | 0.184 | 0.097 | -2.420 | 0 | 264.703 | 2.602 | 70074.249 |
-| Realistic + Advanced | 0.983 | 0.963 | 0.973 | 0.946 | 0 | 326.318 | 5.103 | 3.664 |
+Proje yapısı:
 
-## 3-Target System- Results
+- `fetch_ground_truth.py`: Ground truth verisini çeken ve oluşturan kod. Bu dosyaya dokunulmadı.
+- `radar_sim.py`: Ground truth verisinden idealize ve gerçekçi radar sensör verileri üreten simülatör.
+- `fusion_basic.py`: Basit füzyon metodu.
+- `fusion_advanced.py`: Gelişmiş füzyon metodu (CI destekli).
+- `fusion_evaluation.py`: Farklı kombinasyonları karşılaştırmak için metrik hesaplama.
+- `main.py`: Grafik üretmeden, senaryoları çalıştırıp metrik tablosunu oluşturan sade ana dosya.
+- `streamlit_fusion.py`: Fused sonuçları ve sensör verilerini interaktif olarak görselleştiren Streamlit uygulaması.
 
-| Configuration | Precision | Recall | F1 Score | MOTA | ID Switch | RMSE Pos | RMSE Vel | NEES |
-|--------------|----------:|-------:|---------:|-----:|----------:|---------:|---------:|-----:|
-| Idealized + Baseline | 0.989 | 0.448 | 0.616 | 0.443 | 0 | 202.097 | 4.025 | 40859.337 |
-| Idealized + Advanced | 0.945 | 0.693 | 0.800 | 0.653 | 4 | 213.156 | 7.891 | 12.104 |
-| Realistic + Baseline | 0.084 | 0.132 | 0.102 | -1.311 | 0 | 297.341 | 3.055 | 88420.945 |
-| Realistic + Advanced | 0.896 | 0.684 | 0.776 | 0.604 | 4 | 373.719 | 9.049 | 7.761 |
+## Nasıl Kullanılır
 
+1. Simülasyon verisini ve radar çıktısını üretmek için:
 
-## 5-Configuration System Results- no CI version
+```bash
+python main.py
+```
 
-| Configuration | Precision | Recall | F1 Score | MOTA | ID Switch | RMSE Pos | RMSE Vel | NEES |
-|--------------|----------:|-------:|---------:|-----:|----------:|---------:|---------:|-----:|
-| Idealized + Baseline | 0.989 | 0.448 | 0.616 | 0.443 | 0 | 202.097 | 4.025 | 40859.337 |
-| Idealized + Advanced (CI) | 0.945 | 0.693 | 0.800 | 0.653 | 4 | 213.156 | 7.891 | 12.104 |
-| Realistic + Baseline | 0.084 | 0.132 | 0.102 | -1.311 | 0 | 297.341 | 3.055 | 88420.945 |
-| Realistic + Advanced (CI) | 0.896 | 0.684 | 0.776 | 0.604 | 4 | 373.719 | 9.049 | 7.761 |
-| Realistic + Advanced (No-CI) | 0.892 | 0.686 | 0.775 | 0.602 | 4 | 346.334 | 7.818 | 64.677 |
+2. Streamlit ile görselleştirmek için:
+
+```bash
+streamlit run streamlit_fusion.py
+```
+
+## Notlar
+
+- `main.py` sadece metrik tablosu oluşturur; grafik üretmez.
+- `streamlit_fusion.py` harita ve interaktif görselleştirme için ayrılmıştır.
+- Aşağıdaki eski çıktı dosyaları ve görseller proje kökünden temizlendi.
