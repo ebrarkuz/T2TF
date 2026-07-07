@@ -74,7 +74,7 @@ streamlit run streamlit_fusion.py
 
 ---
 
-## PGT549U
+## Hedef_1
 
 | Füzyon Konfigürasyonu | Precision | Recall | F1 Score | MOTA | ID Switch | RMSE Konum (m) | RMSE Hız (m/s) | NEES |
 |------------------------|---------:|------:|--------:|-----:|----------:|---------------:|---------------:|-----:|
