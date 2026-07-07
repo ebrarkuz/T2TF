@@ -2,7 +2,7 @@
 füzyon2.py
 ==========
 Gorevi: radar_sensor_tracks.csv uzerinden Covariance Intersection (CI)
-fuzyon algoritmasini calistirip fused_tracks.csv cikisi olusturmaktir.
+fuzyon algoritmasini (Sabit Ivme Modeli ile) calistirip fused_tracks.csv cikisi olusturmaktir.
 """
 
 import math
@@ -18,12 +18,12 @@ warnings.filterwarnings("ignore")
 # ===========================================================================
 # KONFIGURASYON & SABITLER
 # ===========================================================================
-PROCESS_NOISE_INTENSITY = 1.5
+PROCESS_NOISE_INTENSITY = 1.5  # CA modelinde "Jerk (İvme değişimi)" varyansını temsil eder
 GATE_CHI2_4DOF = 18.47   
 COAST_TIME_LIMIT = 30.0
-CONFIRM_HITS = 2                # minimum number of updates before a track can be CONFIRMED
-DUPLICATE_DIST_M = 50.0         # if a track appears twice within this distance and short time, treat as spurious
-DUPLICATE_TIME_S = 5.0          # time window for duplicate appearance check (seconds)
+CONFIRM_HITS = 2               # minimum number of updates before a track can be CONFIRMED
+DUPLICATE_DIST_M = 50.0        # if a track appears twice within this distance and short time, treat as spurious
+DUPLICATE_TIME_S = 5.0         # time window for duplicate appearance check (seconds)
 
 TQ_MIN, TQ_MAX = 1, 15
 SIGMA_POS_MAX, SIGMA_POS_MIN = 1500.0, 30.0
@@ -61,6 +61,20 @@ def measurement_cov_from_row(row) -> np.ndarray:
         return np.diag([sp**2, sv**2, sp**2, sv**2])
     return tq_to_cov(row["track_quality"])
 
+def _pad_4d_to_6d(state_4d, cov_4d):
+    """4D ölçümünü 6D (Sabit İvme) durumuna genişletir. İvme varyansı devasa bırakılır."""
+    state_6d = np.zeros((6, 1))
+    state_6d[0, 0] = state_4d[0, 0]  # x
+    state_6d[1, 0] = state_4d[1, 0]  # vx
+    state_6d[3, 0] = state_4d[2, 0]  # y
+    state_6d[4, 0] = state_4d[3, 0]  # vy
+
+    cov_6d = np.eye(6) * 1e5  # İvme için kasıtlı devasa belirsizlik
+    cov_6d[0:2, 0:2] = cov_4d[0:2, 0:2]
+    cov_6d[3:5, 3:5] = cov_4d[2:4, 2:4]
+
+    return state_6d, cov_6d
+
 # ===========================================================================
 # FUZYON ALGORITMASI SINIFLARI
 # ===========================================================================
@@ -78,6 +92,7 @@ def _ci_fuse(x1, P1, x2, P2):
     Pf = 0.5 * (Pf + Pf.T)
     xf = Pf @ (omega * P1i @ x1 + (1 - omega) * P2i @ x2)
     return xf, Pf
+
 def _standard_fuse(x1, P1, x2, P2):
     """Standart Kalman (LMMSE) Güncellemesi. Hataların bağımsız olduğunu varsayar."""
     try:
@@ -97,30 +112,51 @@ class GlobalTrack:
         GlobalTrack._cnt += 1
         self.id = f"GT-{GlobalTrack._cnt:04d}"
         self.time = t
-        self.state = state.reshape(4, 1)
-        self.cov = cov
+        
+        # 4D veriyi 6D CA modeline genişlet
+        state_6d, cov_6d = _pad_4d_to_6d(state.reshape(4, 1), cov)
+        self.state = state_6d
+        self.cov = cov_6d
+        
         self.last_update = t
         self.existence_prob = 0.1 + 0.7 * ((tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
         self.status = "TENTATIVE"
         self.sources: set = {src}
         self.source_radar_names: set = {src[0] if isinstance(src, tuple) else src}
         self.source_measurement_details: set = {f"{src[0] if isinstance(src, tuple) else src}@{t:.2f}"}
-        # Track bookkeeping
+        
         self.hits_count = 1
         self.creation_time = t
-        # store (x,y,time) history for duplicate detection
-        self.position_history = [(float(self.state[0,0]), float(self.state[2,0]), float(t))]
-        self.use_ci = use_ci # Parametreyi kaydet
+        self.position_history = [(float(self.state[0,0]), float(self.state[3,0]), float(t))]
+        self.use_ci = use_ci
 
     def propagate(self, t):
         dt = t - self.time
         if dt <= 0: return
-        F = np.array([[1, dt, 0, 0], [0, 1, 0, 0], [0, 0, 1, dt], [0, 0, 0, 1]])
+        
+        # 6D Sabit İvme Durum Geçiş Matrisi
+        F = np.array([
+            [1, dt, 0.5 * dt**2, 0,  0,           0],
+            [0,  1,          dt, 0,  0,           0],
+            [0,  0,           1, 0,  0,           0],
+            [0,  0,           0, 1, dt, 0.5 * dt**2],
+            [0,  0,           0, 0,  1,          dt],
+            [0,  0,           0, 0,  0,           1]
+        ])
+        
+        # 6D Süreç Gürültüsü Matrisi
         q = PROCESS_NOISE_INTENSITY ** 2
-        qb = q * np.array([[dt**3/3, dt**2/2], [dt**2/2, dt]])
-        Q = np.zeros((4, 4))
-        Q[np.ix_([0,1],[0,1])] = qb
-        Q[np.ix_([2,3],[2,3])] = qb
+        dt2 = dt**2; dt3 = dt**3; dt4 = dt**4
+        qb = q * np.array([
+            [dt4/4, dt3/2, dt2/2],
+            [dt3/2, dt2,   dt],
+            [dt2/2, dt,    1]
+        ])
+        
+        Q = np.zeros((6, 6))
+        Q[np.ix_([0,1,2],[0,1,2])] = qb
+        Q[np.ix_([3,4,5],[3,4,5])] = qb
+        
         self.state = F @ self.state
         self.cov = 0.5 * ((F @ self.cov @ F.T + Q) + (F @ self.cov @ F.T + Q).T)
         self.time = t
@@ -128,10 +164,13 @@ class GlobalTrack:
         self._update_status()
 
     def update(self, meas_state, meas_cov, tq, src):
+        m_state_6d, m_cov_6d = _pad_4d_to_6d(meas_state, meas_cov)
+        
         if self.use_ci:
-            xf, Pf = _ci_fuse(self.state, self.cov, meas_state, meas_cov)
+            xf, Pf = _ci_fuse(self.state, self.cov, m_state_6d, m_cov_6d)
         else:
-            xf, Pf = _standard_fuse(self.state, self.cov, meas_state, meas_cov)
+            xf, Pf = _standard_fuse(self.state, self.cov, m_state_6d, m_cov_6d)
+            
         self.state, self.cov = xf, Pf
         self.last_update = self.time
         mp = 0.5 + 0.45 * ((tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
@@ -139,16 +178,14 @@ class GlobalTrack:
         self.sources.add(src)
         self.source_radar_names.add(src[0] if isinstance(src, tuple) else src)
         self.source_measurement_details.add(f"{src[0] if isinstance(src, tuple) else src}@{self.time:.2f}")
-        # bookkeeping
+        
         self.hits_count += 1
-        self.position_history.append((float(self.state[0,0]), float(self.state[2,0]), float(self.time)))
+        self.position_history.append((float(self.state[0,0]), float(self.state[3,0]), float(self.time)))
         self._update_status()
 
     def _update_status(self):
-        # Deleted if coasted out or very low existence probability
         if (self.time - self.last_update) > COAST_TIME_LIMIT or self.existence_prob < 0.2:
             self.status = "DELETED"
-        # Only confirm if existence probability is high AND we have enough update hits
         elif self.existence_prob > 0.85 and self.hits_count >= CONFIRM_HITS:
             self.status = "CONFIRMED"
         else:
@@ -168,6 +205,14 @@ class FusionCenter:
 
         gt_by_id = {gt.id: i for i, gt in enumerate(self.tracks)}
         matched_gt, matched_m = set(), set()
+        
+        # Gözlem (Observation) Matrisi H: 6D Durumu 4D ölçüme iz düşürür
+        H = np.array([
+            [1, 0, 0, 0, 0, 0],  # x
+            [0, 1, 0, 0, 0, 0],  # vx
+            [0, 0, 0, 1, 0, 0],  # y
+            [0, 0, 0, 0, 1, 0]   # vy
+        ])
 
         for mi, m in enumerate(measurements):
             gid = self.src_map.get(m["src"])
@@ -175,8 +220,11 @@ class FusionCenter:
             gi = gt_by_id[gid]
             if gi in matched_gt: continue
             gt = self.tracks[gi]
-            S = gt.cov + m["cov"]
-            diff = gt.state - m["state"]
+            
+            # H ile iz düşüm hesaplaması
+            S = H @ gt.cov @ H.T + m["cov"]
+            diff = H @ gt.state - m["state"]
+            
             try:
                 if float((diff.T @ np.linalg.inv(S) @ diff).item()) < GATE_CHI2_4DOF:
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
@@ -188,14 +236,13 @@ class FusionCenter:
         r_gt = [i for i in range(len(self.tracks)) if i not in matched_gt]
         r_m  = [i for i in range(len(measurements)) if i not in matched_m]
         if r_gt and r_m:
-            # DÜZELTME 1: np.inf yerine çok büyük bir rakam (1e9) veriyoruz
             cost = np.full((len(r_gt), len(r_m)), 1e9) 
             for ri, gi in enumerate(r_gt):
                 gt = self.tracks[gi]
                 for ci, mi in enumerate(r_m):
                     m = measurements[mi]
-                    S = gt.cov + m["cov"]
-                    diff = gt.state - m["state"]
+                    S = H @ gt.cov @ H.T + m["cov"]
+                    diff = H @ gt.state - m["state"]
                     try:
                         Si = np.linalg.inv(S)
                         _, ld = np.linalg.slogdet(S)
@@ -205,10 +252,8 @@ class FusionCenter:
                     except np.linalg.LinAlgError:
                         pass
 
-            # DÜZELTME 2: np.isinf yerine 1e9 kontrolü yapıyoruz
             if not np.all(cost == 1e9):
                 for ri, ci in zip(*linear_sum_assignment(cost)):
-                    # DÜZELTME 3: np.inf kontrolü yerine ceza limiti kontrolü yapıyoruz
                     if cost[ri, ci] >= 1e9: continue 
                     
                     gi, mi = r_gt[ri], r_m[ci]
@@ -217,11 +262,13 @@ class FusionCenter:
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
                     self.src_map[m["src"]] = gt.id
                     matched_gt.add(gi); matched_m.add(mi)
+                    
         for mi, m in enumerate(measurements):
             if mi in matched_m: continue
             ng = GlobalTrack(t, m["state"], m["cov"], m["tq"], m["src"], use_ci=self.use_ci)
             self.tracks.append(ng)
             self.src_map[m["src"]] = ng.id
+
 # ===========================================================================
 # ANA YURUTME
 # ===========================================================================
@@ -257,7 +304,6 @@ def run_advanced_fusion(
 
         for gt in fc.tracks:
             if gt.status == "CONFIRMED":
-                # eliminate short spurious tracks that appear twice in nearby positions quickly
                 if hasattr(gt, 'position_history') and len(gt.position_history) >= 2:
                     x1, y1, t1 = gt.position_history[-1]
                     x0, y0, t0 = gt.position_history[-2]
@@ -266,18 +312,21 @@ def run_advanced_fusion(
                     if dt_hist <= DUPLICATE_TIME_S and dist_hist <= DUPLICATE_DIST_M and gt.hits_count < (CONFIRM_HITS + 1):
                         gt.status = "DELETED"
                         continue
+                        
+                # 6D Endeks Düzeltmeleri Uygulandı (3 ve 4. indeksler)
                 sigma_x = math.sqrt(max(float(gt.cov[0, 0]), 1e-6))
                 sigma_vx = math.sqrt(max(float(gt.cov[1, 1]), 1e-6))
-                sigma_y = math.sqrt(max(float(gt.cov[2, 2]), 1e-6))
-                sigma_vy = math.sqrt(max(float(gt.cov[3, 3]), 1e-6))
+                sigma_y = math.sqrt(max(float(gt.cov[3, 3]), 1e-6))
+                sigma_vy = math.sqrt(max(float(gt.cov[4, 4]), 1e-6))
                 source_names = ", ".join(sorted(gt.source_radar_names))
+                
                 output_records.append({
                     "time": t_val,
                     "global_track_id": gt.id,
                     "x": float(gt.state[0, 0]),
-                    "y": float(gt.state[2, 0]),
+                    "y": float(gt.state[3, 0]),
                     "vx": float(gt.state[1, 0]),
-                    "vy": float(gt.state[3, 0]),
+                    "vy": float(gt.state[4, 0]),
                     "pos_sigma_m": sigma_x,
                     "vel_sigma_mps": sigma_vx,
                     "sigma_x_m": sigma_x,
@@ -293,6 +342,7 @@ def run_advanced_fusion(
 
     fused_df = pd.DataFrame(output_records)
     fused_df.to_csv(output_csv, index=False)
+    
     if verbose:
         if not fused_df.empty:
             print(f"Füzyon tamamlandı. {len(fused_df)} CONFIRMED kayıt bulundu.")

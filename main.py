@@ -3,7 +3,7 @@ import pandas as pd
 
 from fusion_advanced import run_advanced_fusion
 from fusion_basic import run_basic_fusion
-from fusion_evaluation import compute_tracking_metrics
+from fusion_evaluation import compute_tracking_metrics, compute_target_specific_metrics
 from radar_sim import generate_sensor_csvs
 
 # ==========================================
@@ -77,6 +77,51 @@ def step3_compute_metrics():
     return comp_df
 
 
+def step4_compute_target_metrics():
+    """Her hedef için ayrı ayrı metrikleri hesapla ve göster."""
+    print("\n[AŞAMA 4] Hedef bazlı metrikler hesaplanıyor...\n")
+
+    if not os.path.exists(GROUND_TRUTH_CSV):
+        raise FileNotFoundError(f"Ground truth dosyası bulunamadı: {GROUND_TRUTH_CSV}")
+
+    gt_df = pd.read_csv(GROUND_TRUTH_CSV)
+    
+    # Hedefleri belirle
+    gt_key = "callsign" if "callsign" in gt_df.columns else "target"
+    targets = sorted(gt_df[gt_key].unique())
+    
+    dfs = {
+        "İdealize + Temel": _safe_read_csv(RES_IDEAL_BASIC),
+        "İdealize + Gelişmiş (CI)": _safe_read_csv(RES_IDEAL_ADV),
+        "Gerçekçi + Temel": _safe_read_csv(RES_REAL_BASIC),
+        "Gerçekçi + Gelişmiş (CI)": _safe_read_csv(RES_REAL_ADV),
+        "Gerçekçi + Gelişmiş (No-CI)": _safe_read_csv(RES_REAL_ADV_NOCI),
+    }
+
+    # Her hedef için metrikleri hesapla
+    for target in targets:
+        print("=" * 100)
+        print(f"HEDEF: {target}".center(100))
+        print("=" * 100)
+        
+        target_metrics = {}
+        for scenario_name, fused_df in dfs.items():
+            if fused_df.empty:
+                continue
+            metrics = compute_target_specific_metrics(gt_df, fused_df, target)
+            target_metrics[scenario_name] = metrics
+        
+        if target_metrics:
+            target_df = pd.DataFrame(target_metrics).T
+            # Metric sütunları seç ve sırala
+            display_cols = ["precision", "recall", "f1_score", "mota", "id_switches", "rmse_pos_m", "rmse_vel_mps", "nees"]
+            target_df = target_df[[col for col in display_cols if col in target_df.columns]]
+            target_df.columns = ["Precision", "Recall", "F1 Score", "MOTA", "ID Switch", "RMSE Pos (m)", "RMSE Vel (m/s)", "NEES"]
+            
+            print(target_df.round(3).to_string())
+            print()
+
+
 def main():
     print("=" * 70)
     print("RADAR FÜZYON - METRİK TABLOSU".center(70))
@@ -85,6 +130,7 @@ def main():
     step1_generate_data()
     step2_run_scenarios()
     step3_compute_metrics()
+    step4_compute_target_metrics()
 
 
 if __name__ == '__main__':
