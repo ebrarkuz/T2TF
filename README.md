@@ -138,3 +138,106 @@ streamlit run streamlit_fusion.py
 | Gerçekçi + Temel | **0.450980** | 0.547619 | **0.494624** | -0.119048 | 0 | 171.896554 | 6.456980 | 29590.117944 |
 | Gerçekçi + Gelişmiş (CI) | 0.329406 | **0.668711** | 0.441386 | -0.692628 | 0 | 203.711025 | 19.608341 | **3.847976** |
 | Gerçekçi + Gelişmiş (No-CI) | 0.334641 | 0.655591 | 0.443104 | -0.647905 | 0 | **171.698914** | 25.183260 | 21.094487 |
+
+
+## Hareket Modeli: Neden Sabit İvmeli Modele Geçtik?
+
+İlk versiyonda global track'leri ileriye taşımak için **sabit hız modeli (Constant Velocity - CV)** 
+kullanıldı. Bu modelde hedefin bir sonraki konumu yalnızca mevcut hız vektörüyle tahmin edilir:
+x(t+dt) = x(t) + vx * dt
+y(t+dt) = y(t) + vy * dt
+
+Bu yaklaşım doğrusal hareket eden hedeflerde yeterli performans gösterdi. Ancak koordineli dönüş 
+yapan manevralı hedeflerde model yetersiz kaldı: dönüş sırasında tahmin edilen konum gerçek 
+konumdan hızla saptı, gelen ölçümler gate'i geçemedi ve track koptu.
+
+Bu sorunu gidermek için **sabit ivmeli hareket modeli (Constant Acceleration - CA)** benimsendi.
+CA modelinde state vektörü 4 boyuttan 6 boyuta genişletildi:
+CV: [x, vx,     y, vy    ]   → 4 boyut
+CA: [x, vx, ax, y, vy, ay]   → 6 boyut
+
+İvme bileşenleri (ax, ay) sayesinde propagation adımında Newton'un hareket denklemleri tam 
+olarak uygulanabiliyor:
+x(t+dt)  = x(t) + vxdt + 0.5axdt²
+vx(t+dt) = vx(t) + axdt
+ax(t+dt) = ax(t)
+
+Sonuçlar bu geçişin etkisini somut olarak ortaya koyuyor. Manevralı hedef için:
+
+| Model | Recall | F1 Score | NEES    |
+|-------|--------|----------|---------|
+| CV    | 0.249  | 0.159    | 45.24   |
+| CA    | 0.635  | 0.349    | 14.86   |
+
+Recall'daki artış (%155) CA modelinin manevra sırasında kopan track'leri artık takip 
+edebildiğini gösteriyor. NEES'in düşmesi ise istatistiksel tutarlılığın iyileştiğine işaret ediyor.
+
+---
+
+## Füzyon Yöntemi: CI Neden Seçildi, Nerede Kullanılıyor?
+
+### CI Nerede Kullanılıyor?
+
+**CI füzyon adımında kullanılıyor, association adımında değil.**
+
+Association (eşleştirme) adımı tamamen ayrı çalışıyor: her radar ölçümünün hangi global track'e 
+ait olduğuna Mahalanobis mesafesi ve Hungarian algoritmasıyla karar veriliyor. Bu adımda CI'ın 
+bir rolü yok.
+
+CI, association tamamlandıktan sonra devreye giriyor: eşleştirilmiş radar ölçümü ile mevcut 
+global track, CI algoritmasıyla birleştirilerek güncel bir global state üretiliyor.
+
+### Neden CI?
+
+Bu sistemin temel mimarisi **no-feedback, asenkron track-to-track fusion**. Her radar kendi 
+lokal tracker'ını bağımsız çalıştırıyor ve yalnızca track bilgisini (konum + hız + kovaryans) 
+merkezi füzyon noktasına gönderiyor. Merkezi sistem radarların iç durumunu bilmiyor, radarlara 
+geri bildirim vermiyor.
+
+Bu mimaride kritik bir problem ortaya çıkıyor: **bilinmeyen çapraz kovaryans (unknown 
+cross-correlation)**. Aynı fiziksel hedefe bakan iki radar birbirinden bağımsız gibi görünse de 
+aynı gerçeği gözlemledikleri için tahminleri arasında gizli bir korelasyon var. Bu korelasyonu 
+hesaplamak için her radarın iç filtre geçmişine erişmek gerekiyor — no-feedback mimaride bu 
+mümkün değil.
+
+Standart LMMSE (Kalman tabanlı) füzyon bu korelasyonu sıfır varsayar. Sonuç: birleşik 
+kovaryans gerçekte olduğundan küçük hesaplanır, filtre "aşırı güvenli" davranır ve zamanla 
+ıraksar. NEES metriği bu durumu sayısal olarak ortaya koyuyor:
+Gerçekçi + Temel (LMMSE):  NEES = 54.983  → ciddi tutarsızlık
+Gerçekçi + CI:              NEES =  3.217  → ideale yakın (ideal = 4.0 / 4 DOF)
+
+**Covariance Intersection (CI)**, çapraz kovaryans bilinmese bile istatistiksel tutarlılığı 
+garanti eden tek füzyon yöntemidir (Julier & Uhlmann, 1997). Formül:
+P_fused⁻¹ = ω · P_track⁻¹ + (1-ω) · P_ölçüm⁻¹
+x_fused   = P_fused · (ω · P_track⁻¹ · x_track + (1-ω) · P_ölçüm⁻¹ · x_ölçüm)
+
+ω parametresi [0,1] aralığında, P_fused'in trace'ini minimize edecek şekilde sayısal 
+optimizasyonla bulunuyor. TQ (Track Quality) yüksek olan kaynağın kovaryansı küçük olduğu 
+için büyük ω alıyor — yani kaliteli ölçüm füzyona daha fazla ağırlıkla giriyor.
+
+CI'ın garantisi: korelasyon ne olursa olsun P_fused gerçek belirsizliği asla küçümsemez. 
+Bu, filtrenin ıraksamasını önlüyor.
+
+### Neden Kalman Update Kullanmadık?
+
+Kalman filtresinin update adımı sensörlerin birbirinden **bağımsız** hata yaptığını varsayar. 
+Bu varsayım altında:
+K = P⁻ · Hᵀ · (H · P⁻ · Hᵀ + R)⁻¹
+x̂ = x̂⁻ + K · (z - H · x̂⁻)
+P = (I - K·H) · P⁻
+
+Sensörler gerçekten bağımsız olsaydı bu optimal olurdu. Ama no-feedback mimaride aynı hedefe 
+bakan radarların tahminleri arasındaki korelasyon bilinmiyor ve sıfır varsayılıyor. Bu varsayım 
+yanlış olduğunda Kalman update kovaryansı gereğinden fazla küçültüyor — filtre tutarsız hale 
+geliyor.
+
+Özetle:
+
+| Yöntem          | Çapraz kovaryans gerekiyor mu? | No-feedback'te güvenli mi? |
+|-----------------|-------------------------------|---------------------------|
+| Kalman update   | Evet                          | Hayır                     |
+| CI              | Hayır                         | Evet (tutarlılık garantili)|
+
+Bu nedenle propagation (predict) adımında kinematik model (CA), füzyon (update) adımında 
+ise CI kullanılıyor. İkisi birbirini tamamlıyor: CA iyi bir prior tahmin üretiyor, CI bu 
+tahmini gelen ölçümle tutarlı şekilde birleştiriyor.
