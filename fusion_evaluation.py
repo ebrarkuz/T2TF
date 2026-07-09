@@ -182,7 +182,7 @@ def compute_target_specific_metrics(gt_df, fused_df, target_callsign, max_match_
     Parametreler:
         gt_df: Ground truth DataFrame
         fused_df: Fused track DataFrame
-        target_callsign: Hedefin callsign'ı (örn: 'PGT549U', 'HEDEF_2', 'HEDEF_3_MANEVRA')
+        target_callsign: Hedefin callsign'ı (örn: 'HEDEF_1', 'HEDEF_2', 'HEDEF_3')
         max_match_distance: Eşleştirme için maksimum mesafe (metre)
     
     Dönüş: Metrikler dictionary

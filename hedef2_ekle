@@ -2,7 +2,10 @@ import pandas as pd
 import numpy as np
 
 # 1. Mevcut tek uçaklı veriyi oku
-df1 = pd.read_csv("ground_truth_adsb.csv")
+KEEP_COLS = ["time", "x", "y", "z", "vx", "vy", "vz", "callsign", "lat", "lon", "alt_m", "time_unix"]
+
+df1 = pd.read_csv("ground_truth_adsb.csv")[KEEP_COLS].copy()
+df1["callsign"] = "HEDEF_1"
 
 # 2. İkinci uçak için verinin kopyasını oluştur (Aynalanmış Rota)
 df2 = df1.copy()
@@ -16,7 +19,7 @@ df2["vx"] = -df1["vx"]
 
 # 3. Üçüncü uçak için verinin kopyasını oluştur (Non-lineer / Sinüzoidal Rota)
 df3 = df1.copy()
-df3["callsign"] = "HEDEF_3_MANEVRA"
+df3["callsign"] = "HEDEF_3"
 
 # Dalga frekansını belirlemek için zamanı sıfırdan başlatalım
 t_norm = df3["time"] - df3["time"].min()

@@ -110,8 +110,9 @@ def build_map_data(gt_df: pd.DataFrame, sensor_df: pd.DataFrame, fused_df: pd.Da
     gt_hover = []
 
     for _, row in gt_df.iterrows():
-        gt_lat.append(row["lat"])
-        gt_lon.append(row["lon"])
+        lat, lon = enu_to_latlon(row["x"], row["y"], ref_lat, ref_lon)
+        gt_lat.append(lat)
+        gt_lon.append(lon)
         gt_time.append(row["time"])
         gt_id.append(row.get("callsign", str(row.name)))
         gt_hover.append(
@@ -170,15 +171,47 @@ def main():
         "Bu uygulama, her radarın farklı renkte ölçümlerini, ground truth rotasını açık gri çizgi olarak ve füzyon sonuçlarını tıklanabilir noktalar olarak gösterir."
     )
 
+    # Debug: Veri yapısını göster
+    gt_data_in_frame = data[data["sensor_group"] == "Ground Truth"]
+    st.sidebar.write(f"**Debug - Tüm veride GT noktaları:** {len(gt_data_in_frame)}")
+    if len(gt_data_in_frame) > 0:
+        st.sidebar.write(f"  - Zaman aralığı: {gt_data_in_frame['time'].min():.1f}s - {gt_data_in_frame['time'].max():.1f}s")
+        st.sidebar.write(f"  - Hedefler: {sorted(gt_data_in_frame['id'].unique())}")
+
     st.sidebar.markdown("### Filtreler")
     sensors = sorted(sensor_df["sensor"].unique())
     selected_sensors = st.sidebar.multiselect("Radar seç", sensors, default=sensors)
+    
+    # Zaman aralığını belirle (GT verilerine göre)
+    gt_times = data[data["sensor_group"] == "Ground Truth"]["time"]
+    if len(gt_times) > 0:
+        gt_min_time = float(gt_times.min())
+        gt_max_time = float(gt_times.max())
+    else:
+        gt_min_time = float(data["time"].min())
+        gt_max_time = float(data["time"].max())
+    
     min_time = float(data["time"].min())
     max_time = float(data["time"].max())
-    selected_time = st.sidebar.slider("Zaman aralığı", min_value=min_time, max_value=max_time, value=(min_time, max_time), step=1.0)
+    
+    # Slider: GT verilerini tamamen kapsayacak şekilde default set et
+    selected_time = st.sidebar.slider(
+        "Zaman aralığı", 
+        min_value=min_time, 
+        max_value=max_time, 
+        value=(gt_min_time, gt_max_time),  # Default olarak GT aralığını göster
+        step=1.0
+    )
 
     filtered = data[(data["time"] >= selected_time[0]) & (data["time"] <= selected_time[1])]
     filtered = filtered[filtered["sensor_group"].isin(selected_sensors + ["Fused", "Ground Truth"])]
+
+    # Debug: Filtrelenmiş GT noktaları
+    filtered_gt = filtered[filtered["sensor_group"] == "Ground Truth"]
+    st.sidebar.write(f"**Filtrelenen GT noktaları:** {len(filtered_gt)}")
+    if len(filtered_gt) > 0:
+        st.sidebar.write(f"  - Hedefler: {sorted(filtered_gt['id'].unique())}")
+        st.sidebar.write(f"  - Zaman aralığı: {filtered_gt['time'].min():.1f}s - {filtered_gt['time'].max():.1f}s")
 
     fig = go.Figure()
 
@@ -212,27 +245,51 @@ def main():
         )
 
     gt_points = filtered[filtered["sensor_group"] == "Ground Truth"]
-    gt_colors = ["lightgray", "white", "lightblue"]
-    for idx, (callsign, grp) in enumerate(gt_points.groupby("id")):
-        grp = grp.sort_values("time")
-        fig.add_trace(
-            go.Scattermapbox(
-                lat=grp["lat"],
-                lon=grp["lon"],
-                mode="lines",
-                line=dict(width=2, color=gt_colors[idx % len(gt_colors)]),
-                name=f"GT: {callsign}",
-                hovertext=grp["hover"],
-                hoverinfo="text",
+    
+    # Debug: Kaç GT noktası var ve hangi hedefler?
+    if not gt_points.empty:
+        unique_targets = sorted(gt_points["id"].unique())
+        st.sidebar.info(f"**Ground Truth hedefleri:** {', '.join(unique_targets)}\n**Toplam GT noktası (filtered):** {len(gt_points)}")
+        st.sidebar.write(f"**Trace ekleme detayları:**")
+    else:
+        st.sidebar.warning("Seçilen zaman aralığında Ground Truth verisi yok!")
+    
+    # Her hedef için ayrı renk (sıralı callsign'lere göre)
+    gt_colors = ["#808080", "#0066CC", "#FF6600"]  # Gri, mavi, turuncu
+    
+    trace_count = 0
+    if not gt_points.empty:
+        sorted_callsigns = sorted(gt_points["id"].unique())
+        st.sidebar.write(f"  Toplam hedef: {len(sorted_callsigns)}")
+        
+        for idx, callsign in enumerate(sorted_callsigns):
+            grp = gt_points[gt_points["id"] == callsign].sort_values("time")
+            st.sidebar.write(f"    - {callsign}: {len(grp)} points")
+            
+            fig.add_trace(
+                go.Scattermapbox(
+                    lat=grp["lat"],
+                    lon=grp["lon"],
+                    mode="lines+markers",
+                    line=dict(width=3, color=gt_colors[idx % len(gt_colors)]),
+                    marker=dict(size=6, color=gt_colors[idx % len(gt_colors)]),
+                    name=f"GT: {callsign}",
+                    hovertext=grp["hover"],
+                    hoverinfo="text",
+                )
             )
-        )
+            trace_count += 1
+        st.sidebar.write(f"  ✓ {trace_count} trace eklendi")
 
     fig.update_layout(
-        mapbox_style="open-street-map",
-        mapbox_center={"lat": ref_lat, "lon": ref_lon},
-        mapbox_zoom=8,
+        mapbox=dict(
+            style="open-street-map",
+            center={"lat": ref_lat, "lon": ref_lon},
+            zoom=7,
+        ),
         margin={"r":0, "t":40, "l":0, "b":0},
         title="Radar Ölçümleri, Füzyon Sonuçları ve Ground Truth",
+        height=700,
     )
 
     st.plotly_chart(fig, use_container_width=True)

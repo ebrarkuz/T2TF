@@ -14,7 +14,7 @@ scenarios = [
     ('res_real_adv.csv', 'Gercekçi + Advanced (CI)'),
 ]
 
-targets = ['HEDEF_2', 'HEDEF_3_MANEVRA', 'PGT549U']
+targets = ['HEDEF_1', 'HEDEF_2', 'HEDEF_3']
 
 print("\n" + "="*120)
 print(" "*35 + "PER-TARGET FUSION METRICS (with Acceleration Model)")

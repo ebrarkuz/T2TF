@@ -13,8 +13,8 @@ print(f'\nGT measurements: {len(gt_df)}')
 print(f'GT columns: {list(gt_df.columns)}')
 
 from fusion_evaluation import compute_target_specific_metrics
-print('\nComputing metrics for HEDEF_3_MANEVRA...')
-metrics = compute_target_specific_metrics(gt_df, fused_df, 'HEDEF_3_MANEVRA')
+print('\nComputing metrics for HEDEF_3...')
+metrics = compute_target_specific_metrics(gt_df, fused_df, 'HEDEF_3')
 print('Done!')
 print(f"F1 Score:     {metrics.get('f1_score', 0):.3f}")
 print(f"Precision:    {metrics.get('precision', 0):.3f}")
