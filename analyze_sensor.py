@@ -16,7 +16,7 @@ print(f'  is_clutter=True (clutter): {(sensor["is_clutter"] == True).sum()}')
 print()
 
 # Per-target
-targets = ['HEDEF_2', 'HEDEF_3_MANEVRA', 'PGT549U']
+targets = ['HEDEF_1', 'HEDEF_2', 'HEDEF_3']
 for t in targets:
     t_data = sensor[sensor['callsign_true'] == t]
     real = (t_data['is_clutter'] == False).sum()
@@ -26,9 +26,9 @@ for t in targets:
         print(f'{t:20s}: {real:4d} real, {clutter:4d} clutter (times: {tmin:.1f} - {tmax:.1f} s)')
 
 # Speed analysis for HEDEF_3
-h3_real = sensor[(sensor['callsign_true'] == 'HEDEF_3_MANEVRA') & (sensor['is_clutter'] == False)]
+h3_real = sensor[(sensor['callsign_true'] == 'HEDEF_3') & (sensor['is_clutter'] == False)]
 print()
-print('HEDEF_3_MANEVRA speed analysis (REAL measurements only):')
+print('HEDEF_3 speed analysis (REAL measurements only):')
 if len(h3_real) > 0:
     h3_real['speed'] = (h3_real['vx']**2 + h3_real['vy']**2)**0.5
     print(f'  Speed: min={h3_real["speed"].min():.1f}, max={h3_real["speed"].max():.1f}, mean={h3_real["speed"].mean():.1f} m/s')
@@ -40,4 +40,4 @@ if len(h3_real) > 0:
         radar_data = h3_real[h3_real['sensor'] == radar]
         print(f'    {radar}: {len(radar_data)} measurements')
 else:
-    print('  NO REAL MEASUREMENTS FOR HEDEF_3_MANEVRA!')
+    print(f'  NO REAL MEASUREMENTS FOR HEDEF_3!')

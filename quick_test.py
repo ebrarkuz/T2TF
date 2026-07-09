@@ -30,10 +30,10 @@ gt_df = pd.read_csv('ground_truth_adsb_multi.csv')
 fused_df = pd.read_csv('res_quick_test.csv')
 
 print("="*100)
-print(" "*35 + "HEDEF_3_MANEVRA METRICS (QUICK TEST)")
+print(" "*35 + "HEDEF_3 METRICS (QUICK TEST)")
 print("="*100 + "\n")
 
-metrics = compute_target_specific_metrics(gt_df, fused_df, 'HEDEF_3_MANEVRA')
+metrics = compute_target_specific_metrics(gt_df, fused_df, 'HEDEF_3')
 print(f"F1 Score:     {metrics.get('f1_score', 0):.3f}")
 print(f"Precision:    {metrics.get('precision', 0):.3f}")
 print(f"Recall:       {metrics.get('recall', 0):.3f}")
