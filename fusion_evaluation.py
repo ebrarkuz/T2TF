@@ -66,6 +66,7 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=1000.0):
     gt_tracks = {cs: sub.sort_values("time") for cs, sub in gt_df.groupby(gt_key)}
 
     total_tp = total_fp = total_fn = total_gt = 0
+    total_tp_id = 0   # ID-tutarlı TP: aynı hedefi ardışık karelerde aynı track ID'siyle bulma
     id_switches = 0
     prev_assign = {}
     matched_rows = []
@@ -97,8 +98,15 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=1000.0):
             gt_state = gt_states[ci]
             fused_id = fused_row["global_track_id"]
             gt_id = gt_state["track_id"]
-            if fused_id in prev_assign and prev_assign[fused_id] is not None and prev_assign[fused_id] != gt_id:
+            is_id_switch = (
+                fused_id in prev_assign
+                and prev_assign[fused_id] is not None
+                and prev_assign[fused_id] != gt_id
+            )
+            if is_id_switch:
                 id_switches += 1
+            else:
+                total_tp_id += 1  # Konum VE kimlik doğru
             prev_assign[fused_id] = gt_id
             matched_rows.append((fused_row, gt_state))
 
@@ -106,9 +114,14 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=1000.0):
             fused_id = fused_frame.iloc[ri]["global_track_id"]
             prev_assign[fused_id] = None
 
-    precision = total_tp / (total_tp + total_fp) if total_tp + total_fp > 0 else 0.0
+    # detection_precision: Sadece uzaysal konum doğruluğu (ID bilgisini görmezden gelir)
+    detection_precision = total_tp / (total_tp + total_fp) if total_tp + total_fp > 0 else 0.0
+    # id_precision: Konum VE kimlik tutarlılığını birlikte ölçer (ID switch'leri FP gibi cezalandırır)
+    id_precision = total_tp_id / (total_tp_id + total_fp + id_switches) if (total_tp_id + total_fp + id_switches) > 0 else 0.0
+    precision = detection_precision  # Geriye dönük uyumluluk için korunur
     recall = total_tp / (total_tp + total_fn) if total_tp + total_fn > 0 else 0.0
     f1_score = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
+    id_f1 = 2 * id_precision * recall / (id_precision + recall) if id_precision + recall > 0 else 0.0
     mota = 1.0 - (total_fn + total_fp + id_switches) / max(total_gt, 1)
 
     rmse_pos = rmse_vel = nees_mean = np.nan
@@ -143,12 +156,15 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=1000.0):
         nees_mean = float(np.mean(nees_vals)) if nees_vals else np.nan
 
     return {
-        "precision": precision,
+        "precision": precision,           # Uzaysal detection precision (ID agnostik)
+        "id_precision": id_precision,      # ID-tutarlı precision (daha katı)
         "recall": recall,
-        "f1_score": f1_score,
+        "f1_score": f1_score,              # detection_precision bazlı
+        "id_f1": id_f1,                    # id_precision bazlı (daha katı)
         "mota": mota,
         "id_switches": id_switches,
         "total_tp": total_tp,
+        "total_tp_id": total_tp_id,
         "total_fp": total_fp,
         "total_fn": total_fn,
         "total_gt": total_gt,
@@ -210,33 +226,48 @@ def compute_target_specific_metrics(gt_df, fused_df, target_callsign, max_match_
         
         gt_state = interpolate_gt_state(gt_target, t)
         if gt_state is None:
-            total_fp += len(fused_frame)
+            # GT verisi bu an için interpolate edilemiyorsa atla (FP yazmak hatalıdır)
             continue
         
         gt_states = [gt_state]
         total_gt += 1
-        
-        matches, unmatched_fused, unmatched_gt = frame_matches(
-            fused_frame, gt_states, max_distance=max_match_distance
+
+        # Uzaysal ön-filtre: yalnızca bu hedefe yakın detections değerlendirilir.
+        # Aksi hâlde başka hedeflerin/clutter'ların track'leri FP olarak sayılır.
+        dist_arr = np.sqrt(
+            (fused_frame["x"].to_numpy() - gt_state["x"]) ** 2 +
+            (fused_frame["y"].to_numpy() - gt_state["y"]) ** 2
         )
-        
+        fused_candidates = fused_frame[dist_arr <= max_match_distance].reset_index(drop=True)
+
+        if fused_candidates.empty:
+            total_fn += 1
+            continue
+
+        matches, unmatched_fused, unmatched_gt = frame_matches(
+            fused_candidates, gt_states, max_distance=max_match_distance
+        )
+
         total_tp += len(matches)
-        total_fp += len(unmatched_fused)
+        total_fp += len(unmatched_fused)  # Hedefe yakın ama eşleşemeyen detections
         total_fn += len(unmatched_gt)
         
-        # ID switch kontrol
+        # ID switch kontrol (fused_candidates üzerinden)
         for ri, ci in matches:
-            fused_row = fused_frame.iloc[ri]
+            fused_row = fused_candidates.iloc[ri]
             fused_id = fused_row["global_track_id"]
-            
+
             if fused_id in prev_assign and prev_assign[fused_id] != target_callsign:
                 id_switches += 1
             prev_assign[fused_id] = target_callsign
             matched_rows.append((fused_row, gt_state))
     
+    # precision: Hedefe yakın detections içinde doğru eşleşme oranı
     precision = total_tp / (total_tp + total_fp) if total_tp + total_fp > 0 else 0.0
     recall = total_tp / (total_tp + total_fn) if total_tp + total_fn > 0 else 0.0
     f1_score = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
+    # coverage: Hedefin aktif olduğu zaman adımlarında kaçında bir detection bulundu
+    coverage = total_tp / total_gt if total_gt > 0 else 0.0
     mota = 1.0 - (total_fn + total_fp + id_switches) / max(total_gt, 1)
     
     rmse_pos = rmse_vel = nees_mean = np.nan
@@ -272,9 +303,10 @@ def compute_target_specific_metrics(gt_df, fused_df, target_callsign, max_match_
     
     return {
         "callsign": target_callsign,
-        "precision": precision,
+        "precision": precision,    # Hedefe yakın FP'lere karşı TP oranı
         "recall": recall,
         "f1_score": f1_score,
+        "coverage": coverage,      # Hedefin kaç zaman adımında bulunabildiği (0–1)
         "mota": mota,
         "id_switches": id_switches,
         "total_tp": total_tp,

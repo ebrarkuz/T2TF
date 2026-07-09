@@ -77,9 +77,9 @@ RADARS = [
         "bias_x":          15.0,
         "bias_y":         -10.0,
         "bias_drift_std":  0.05,
-        "clutter_rate":    0.0020,
+        "clutter_rate":    0.0003,
         "n_static_clutter":2, 
-        "static_visible_prob": 0.05,
+        "static_visible_prob": 0.04,
         "pos_x":           0.0,
         "pos_y":           0.0,
         "max_range_m":     500000.0,
@@ -101,9 +101,9 @@ RADARS = [
         "bias_x":         -25.0,
         "bias_y":          20.0,
         "bias_drift_std":  0.08,
-        "clutter_rate":    0.0012,
+        "clutter_rate":    0.0002,
         "n_static_clutter":3,
-        "static_visible_prob": 0.10,
+        "static_visible_prob": 0.035,
         "pos_x":           50000.0,
         "pos_y":          -5000.0,
         "max_range_m":     500000.0,
@@ -125,9 +125,9 @@ RADARS = [
         "bias_x":          40.0,
         "bias_y":          35.0,
         "bias_drift_std":  0.12,
-        "clutter_rate":    0.0008,
+        "clutter_rate":    0.0001,
         "n_static_clutter":1,  
-        "static_visible_prob": 0.15,
+        "static_visible_prob": 0.023,
         "pos_x":           15000.0,
         "pos_y":           60000.0,
         "max_range_m":     500000.0,
@@ -680,9 +680,9 @@ def generate_sensor_csvs(
     
     # Simülasyonun başında global statik clutter ve hayalet rotalar oluştur
     print("  Global clutter kaynakları olusturuluyor...")
-    global_static_clutter = generate_global_static_clutter(n_points=15)
+    global_static_clutter = generate_global_static_clutter(n_points=5)
     ghost_tracks = generate_ghost_tracks(gt_df, time_start=50.0, time_end=90.0, 
-                                         n_ghosts=3, speed_range=(5.0, 15.0))
+                                         n_ghosts=1, speed_range=(5.0, 15.0))
     print(f"    -> {len(global_static_clutter)} statik clutter noktasi (binalar, tepe noktaları)")
     print(f"    -> {len(ghost_tracks)} hayalet rota (kus surluleri, hava olaylari)\n")
     

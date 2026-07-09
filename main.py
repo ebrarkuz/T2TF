@@ -65,8 +65,8 @@ def step3_compute_metrics():
 
     metrics = {name: compute_tracking_metrics(gt_df, df) for name, df in dfs.items()}
     comp_df = pd.DataFrame(metrics).T
-    comp_df = comp_df[["precision", "recall", "f1_score", "mota", "id_switches", "rmse_pos_m", "rmse_vel_mps", "nees"]]
-    comp_df.columns = ["Precision", "Recall", "F1 Score", "MOTA", "ID Switch", "RMSE Pos", "RMSE Vel", "NEES"]
+    comp_df = comp_df[["precision", "id_precision", "recall", "f1_score", "id_f1", "mota", "id_switches", "rmse_pos_m", "rmse_vel_mps", "nees"]]
+    comp_df.columns = ["Precision", "ID Precision", "Recall", "F1 Score", "ID F1", "MOTA", "ID Switch", "RMSE Pos", "RMSE Vel", "NEES"]
 
     print("\n" + "=" * 90)
     print("Füzyon kombinasyonları metrik tablosu".center(90))
@@ -114,9 +114,9 @@ def step4_compute_target_metrics():
         if target_metrics:
             target_df = pd.DataFrame(target_metrics).T
             # Metric sütunları seç ve sırala
-            display_cols = ["precision", "recall", "f1_score", "mota", "id_switches", "rmse_pos_m", "rmse_vel_mps", "nees"]
+            display_cols = ["precision", "recall", "f1_score", "coverage", "mota", "id_switches", "rmse_pos_m", "rmse_vel_mps", "nees"]
             target_df = target_df[[col for col in display_cols if col in target_df.columns]]
-            target_df.columns = ["Precision", "Recall", "F1 Score", "MOTA", "ID Switch", "RMSE Pos (m)", "RMSE Vel (m/s)", "NEES"]
+            target_df.columns = ["Precision", "Recall", "F1 Score", "Coverage", "MOTA", "ID Switch", "RMSE Pos (m)", "RMSE Vel (m/s)", "NEES"]
             
             print(target_df.round(3).to_string())
             print()

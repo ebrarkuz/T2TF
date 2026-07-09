@@ -212,15 +212,17 @@ def main():
         )
 
     gt_points = filtered[filtered["sensor_group"] == "Ground Truth"]
-    if not gt_points.empty:
+    gt_colors = ["lightgray", "white", "lightblue"]
+    for idx, (callsign, grp) in enumerate(gt_points.groupby("id")):
+        grp = grp.sort_values("time")
         fig.add_trace(
             go.Scattermapbox(
-                lat=gt_points["lat"],
-                lon=gt_points["lon"],
+                lat=grp["lat"],
+                lon=grp["lon"],
                 mode="lines",
-                line=dict(width=2, color="lightgray"),
-                name="Ground Truth",
-                hovertext=gt_points["hover"],
+                line=dict(width=2, color=gt_colors[idx % len(gt_colors)]),
+                name=f"GT: {callsign}",
+                hovertext=grp["hover"],
                 hoverinfo="text",
             )
         )
