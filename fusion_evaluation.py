@@ -44,7 +44,7 @@ def frame_matches(fused_frame, gt_states, max_distance=00.0):
     return matches, unmatched_fused, unmatched_gt
 
 
-def compute_tracking_metrics(gt_df, fused_df, max_match_distance=400.0):
+def compute_tracking_metrics(gt_df, fused_df, max_match_distance=200.0):
     if fused_df.empty:
         return {
             "precision": 0.0,
@@ -175,7 +175,7 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=400.0):
     }
 
 
-def compute_target_specific_metrics(gt_df, fused_df, target_callsign, max_match_distance=400.0):
+def compute_target_specific_metrics(gt_df, fused_df, target_callsign, max_match_distance=200.0):
     """
     Belirli bir hedef (target) için metrikleri hesapla.
     

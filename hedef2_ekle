@@ -43,10 +43,10 @@ df3["y"] = merkez_y - (df1["y"] - merkez_y)
 df3["vy"] = -df1["vy"]
 
 # X ekseninde orijinal rotaya 15 km genliğinde bir sinüs dalgası ekleyerek non-lineer yapalım
-df3["x"] = df1["x"] + np.sin(t_norm / 100.0) * 3000
+df3["x"] = df1["x"] + np.sin(t_norm / 50.0) * 4000
 
 # Hız (vx) değerini de x'in zamana göre türevini (kosinüs) alarak fiziksel kurallara uygun güncelleyelim
-df3["vx"] = df1["vx"] + np.cos(t_norm / 100.0) * (3000 / 100.0)
+df3["vx"] = df1["vx"] + np.cos(t_norm / 50.0) * (4000 / 50.0)
 
 # Lat/lon'u güncelleştirilmiş x,y'den hesapla
 df3[["lat", "lon"]] = df3.apply(lambda row: pd.Series(enu_to_latlon(row["x"], row["y"], ref_lat, ref_lon)), axis=1)
