@@ -241,3 +241,61 @@ geliyor.
 Bu nedenle propagation (predict) adımında kinematik model (CA), füzyon (update) adımında 
 ise CI kullanılıyor. İkisi birbirini tamamlıyor: CA iyi bir prior tahmin üretiyor, CI bu 
 tahmini gelen ölçümle tutarlı şekilde birleştiriyor.
+
+# Sonuçlar (Sabit İvmeli Hareket Modeli)
+
+> **Not 1:** Aşağıdaki sonuçlar, global track'in gelecekteki zamana taşınması için **Sabit İvmeli Hareket Modeli (Constant Acceleration Motion Model)** kullanılan sürüme aittir.
+>
+> **Not 2:** Bu değerlendirmede **Precision** ve **Recall** metrikleri hesaplanırken eşleştirme mesafesi eşiği **1000 m yerine 400 m** olarak kullanılmıştır.
+>
+> **Not 3:** Ayrıca **HEDEF_3** senaryosundaki hedef rotası **smooth (yumuşatılmış)** hale getirilmiştir.
+
+---
+
+# Genel Performans
+
+| Füzyon Konfigürasyonu | Precision | ID Precision | Recall | F1 Score | ID F1 | MOTA | ID Switch | RMSE Konum (m) | RMSE Hız (m/s) | NEES |
+|------------------------|---------:|------------:|------:|--------:|------:|-----:|----------:|---------------:|---------------:|-----:|
+| İdealize + Temel | 0.944 | 0.944 | 0.637 | 0.760 | 0.760 | 0.599 | 0 | 159.032 | 2.710 | 25298.491 |
+| İdealize + Gelişmiş (CI) | **0.975** | **0.975** | **0.910** | **0.941** | **0.941** | **0.886** | 4 | **133.238** | 4.641 | 3.724 |
+| Gerçekçi + Temel | 0.846 | 0.846 | 0.484 | 0.615 | 0.615 | 0.396 | 0 | 191.480 | 5.935 | 36699.841 |
+| Gerçekçi + Gelişmiş (CI) | 0.842 | 0.842 | **0.790** | **0.815** | **0.815** | **0.642** | 4 | 205.235 | 10.290 | **2.887** |
+| Gerçekçi + Gelişmiş (No-CI) | 0.756 | 0.756 | 0.753 | 0.754 | 0.754 | 0.509 | 4 | 202.807 | 12.505 | 27.305 |
+
+---
+
+# Hedef Bazlı Sonuçlar
+
+## HEDEF_1
+
+| Füzyon Konfigürasyonu | Precision | Recall | F1 Score | Coverage | MOTA | ID Switch | RMSE Konum (m) | RMSE Hız (m/s) | NEES |
+|------------------------|---------:|------:|--------:|---------:|-----:|----------:|---------------:|---------------:|-----:|
+| İdealize + Temel | 0.987179 | 0.578947 | 0.729858 | 0.578947 | 0.571429 | 0 | 135.179158 | 3.422449 | 18285.117831 |
+| İdealize + Gelişmiş (CI) | **0.981514** | **0.829627** | **0.899202** | **0.829627** | **0.814002** | 0 | **114.106696** | 5.283001 | 3.152387 |
+| Gerçekçi + Temel | 0.957447 | 0.494505 | 0.652174 | 0.494505 | 0.472527 | 0 | 175.612383 | 3.995371 | 30855.672199 |
+| Gerçekçi + Gelişmiş (CI) | 0.911792 | **0.769784** | **0.834792** | **0.769784** | **0.695314** | 0 | 188.885049 | 8.177965 | **2.976855** |
+| Gerçekçi + Gelişmiş (No-CI) | 0.841242 | 0.748007 | 0.791890 | 0.748007 | 0.606844 | 0 | 179.832123 | 10.020472 | 36.971112 |
+
+---
+
+## HEDEF_2
+
+| Füzyon Konfigürasyonu | Precision | Recall | F1 Score | Coverage | MOTA | ID Switch | RMSE Konum (m) | RMSE Hız (m/s) | NEES |
+|------------------------|---------:|------:|--------:|---------:|-----:|----------:|---------------:|---------------:|-----:|
+| İdealize + Temel | 1.000000 | 0.684211 | 0.812500 | 0.684211 | 0.684211 | 0 | 133.778455 | **1.759645** | 17899.771422 |
+| İdealize + Gelişmiş (CI) | 0.975834 | **0.940355** | **0.957766** | **0.940355** | **0.917067** | 0 | **119.358812** | 6.649056 | 4.547837 |
+| Gerçekçi + Temel | 0.959184 | 0.516484 | 0.671429 | 0.516484 | 0.494505 | 0 | 173.659340 | 4.767519 | 30180.295625 |
+| Gerçekçi + Gelişmiş (CI) | **0.990398** | **0.802255** | **0.886454** | **0.802255** | **0.794478** | 0 | 209.985104 | 9.877073 | **2.384593** |
+| Gerçekçi + Gelişmiş (No-CI) | 0.915639 | 0.808283 | 0.858618 | 0.808283 | 0.733813 | 0 | 198.851763 | 13.157225 | 23.538947 |
+
+---
+
+## HEDEF_3
+
+| Füzyon Konfigürasyonu | Precision | Recall | F1 Score | Coverage | MOTA | ID Switch | RMSE Konum (m) | RMSE Hız (m/s) | NEES |
+|------------------------|---------:|------:|--------:|---------:|-----:|----------:|---------------:|---------------:|-----:|
+| İdealize + Temel | 1.000000 | 0.646617 | 0.785388 | 0.646617 | 0.646617 | 0 | 194.970950 | **2.793989** | 38021.477607 |
+| İdealize + Gelişmiş (CI) | **0.993779** | **0.960036** | **0.976616** | **0.960036** | **0.954026** | 0 | **158.979733** | 3.447315 | 3.506290 |
+| Gerçekçi + Temel | 0.933333 | 0.461538 | 0.617647 | 0.461538 | 0.428571 | 0 | 214.420577 | 8.158193 | 46042.740089 |
+| Gerçekçi + Gelişmiş (CI) | **0.978302** | **0.797783** | **0.878869** | **0.797783** | **0.780089** | 0 | 214.467660 | 10.950865 | **2.864507** |
+| Gerçekçi + Gelişmiş (No-CI) | 0.936443 | 0.710480 | 0.807960 | 0.710480 | 0.662259 | 0 | 226.425611 | 13.806519 | 20.940927 |
