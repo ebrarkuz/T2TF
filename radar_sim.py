@@ -3,9 +3,11 @@
 ======================
 Gorevi: Hazir olan Ground Truth CSV dosyasini okumak ve 3 farkli
 sanal radarin (A, B, C) olcum karakteristiklerini taklit ederek
-asenkron, gurultulu ve clutter (sahte iz) iceren gercekci sensor verilerini uretmek.
+asenkron, gurultulu ve clutter (sahte iz) iceren sensor verilerini uretmek.
 
-Bu script asagidaki iyilestirmeleri iceren radar_sensor_tracks_gercekci.csv dosyasini uretir:
+Bu script iki farkli CSV dosyasi uretir:
+  1) radar_sensor_tracks_idealize.csv  — orijinal, saf Gaussian gurultulu, basit clutter
+  2) radar_sensor_tracks_gercekci.csv  — asagidaki iyilestirmeler eklenmis:
        [YEN1] Pd mesafeye bagli: uzak hedefte tespit olasiligi dusuyor
        [YEN2/5] Polar Gurultu (Fiziksel Model): Gercek radar polar (R, theta) olcum yapar.
                 Gurultu polar koordinatlarda eklenir, kartezyene cevrildiginde hedefe
@@ -14,15 +16,18 @@ Bu script asagidaki iyilestirmeleri iceren radar_sensor_tracks_gercekci.csv dosy
        [YEN4] Bias drift: sistematik hata zamanla rastgele yuruyusuyle kayiyor
        [YEN6] Doppler Hiz Modeli: Hiz olcumu dogrudan kartezyen degil, radyal (Doppler)
                 ve capraz-radyal (turetilen) olarak modellenmistir.
-       [YENI] Global Clutter Kaynaklari: Radarlar arasinda korelasyon saglayan ortak
-               statik clutter noktalari (binalar, tepe noktalari) ve zamanla sinirli
-               hayalet rotalar (kus suruleri, hava olaylari).
+       [YENI] Global Clutter Kaynakları: Radarlar arasında korelasyon sağlayan ortak
+               statik clutter noktaları (binalar, tepe noktaları) ve zamanla sınırlı
+               hayalet rotalar (kuş sürüleri, hava olayları).
 
 AKADEMIK NOTLAR:
 * Clutter Modeli: Bu calismada "simplified uniform clutter model" (basitlestirilmis
   tekduze clutter modeli) kullanilmistir. Gercek radar sistemlerinde clutter cografi
   olarak kumeli olup cogunlukla Weibull dagilimi gosterir. Bu kargasiklik mevcut 
   calismanin kapsami disinda birakilmistir.
+* Idealize modelde uygulanan "kartezyen yaklasim", dogrudan kartezyen koordinatlarda
+  izotropik Gaussian gürültü varsaymaktadır ve gercek fizikten sapmalar icerir. 
+  Fiziksel gerceklige yakinlik icin "gercekci" simulasyon ciktilari referans alinmalidir.
 """
 
 import math
@@ -37,6 +42,7 @@ TQ_MIN, TQ_MAX = 1, 15
 SIGMA_POS_MAX, SIGMA_POS_MIN = 1500.0, 30.0
 SIGMA_VEL_MAX, SIGMA_VEL_MIN = 25.0, 0.5
 GROUND_TRUTH_CSV = "ground_truth_adsb_multi.csv"
+SENSOR_TRACKS_IDEALIZE_CSV = "radar_sensor_tracks_idealize.csv"
 SENSOR_TRACKS_GERCEKCI_CSV = "radar_sensor_tracks_gercekci.csv"
 
 
@@ -259,6 +265,100 @@ def generate_ghost_tracks(gt_df, time_start: float = 50.0, time_end: float = 90.
 
 
 # ===========================================================================
+# IDEALIZE SIMULASYON (orijinal kod, degistirilmedi)
+# ===========================================================================
+
+def simulate_radar_idealize(radar, gt_df):
+    """
+    Orijinal simulasyon: Sabit Pd, kartezyen yaklasim ile izotropik Gaussian gurultu,
+    rastgele clutter (simplified uniform clutter model), sabit bias.
+    NOT: Bu metot sadece referans kiyaslamasi icindir, gercek radar fiziginden sapar.
+    """
+    records = []
+    callsigns = gt_df["callsign"].unique()
+    t_max = gt_df["time"].max()
+
+    for cs in callsigns:
+        sub = gt_df[gt_df["callsign"] == cs].sort_values("time")
+        t_end = float(sub["time"].iloc[-1])
+
+        local_id = f"{radar['name']}-T{np.random.randint(1000, 9999)}"
+        t = float(sub["time"].iloc[0]) + np.random.uniform(0, radar["revisit_mean_s"])
+        dropped = False
+
+        while t <= t_end:
+            t += max(0.1, np.random.normal(radar["revisit_mean_s"], radar["revisit_jitter"]))
+            if t > t_end:
+                break
+
+            x_true = float(np.interp(t, sub["time"], sub["x"]))
+            y_true = float(np.interp(t, sub["time"], sub["y"]))
+            vx_true = float(np.interp(t, sub["time"], sub["vx"]))
+            vy_true = float(np.interp(t, sub["time"], sub["vy"]))
+
+            if not in_fov(radar, x_true, y_true) or np.random.rand() > radar["pd"]:
+                dropped = True
+                continue
+
+            if dropped:
+                local_id = f"{radar['name']}-T{np.random.randint(1000, 9999)}"
+                dropped = False
+
+            tq = int(np.clip(
+                radar["base_tq"]
+                - (radar["maneuver_tq_pen"] if is_maneuvering(cs, t, gt_df) else 0)
+                + np.random.randint(-radar["tq_jitter"], radar["tq_jitter"] + 1),
+                TQ_MIN, TQ_MAX
+            ))
+
+            sp = tq_to_sigma_pos(tq)   
+            sv = tq_to_sigma_vel(tq)
+
+            records.append({
+                "time":           round(t + radar["delay_s"], 2),
+                "sensor":         radar["name"],
+                "local_track_id": local_id,
+                "callsign_true":  cs,
+                "x":  x_true + radar["bias_x"] + np.random.normal(0, sp),
+                "y":  y_true + radar["bias_y"] + np.random.normal(0, sp),
+                "vx": vx_true + np.random.normal(0, sv),
+                "vy": vy_true + np.random.normal(0, sv),
+                "track_quality": tq,
+                "sigma_pos_m":   sp,
+                "sigma_vel_mps": sv,
+                "is_clutter":    False,
+            })
+
+    xmin, xmax, ymin, ymax = radar["clutter_box"]
+    t = np.random.uniform(0, radar["revisit_mean_s"])
+    while t <= t_max:
+        t += max(0.1, np.random.normal(radar["revisit_mean_s"], radar["revisit_jitter"]))
+        if t > t_max:
+            break
+        for _ in range(np.random.poisson(radar["clutter_rate"])):
+            cx, cy = np.random.uniform(xmin, xmax), np.random.uniform(ymin, ymax)
+            if not in_fov(radar, cx, cy):
+                continue
+            tq = int(np.clip(np.random.randint(1, max(2, radar["base_tq"] - 3)), TQ_MIN, TQ_MAX))
+            sp, sv = tq_to_sigma_pos(tq), tq_to_sigma_vel(tq)
+            records.append({
+                "time":           round(t + radar["delay_s"], 2),
+                "sensor":         radar["name"],
+                "local_track_id": f"{radar['name']}-CL{np.random.randint(10000, 99999)}",
+                "callsign_true":  "CLUTTER",
+                "x": cx, "y": cy,
+                "vx": np.random.normal(0, sv),
+                "vy": np.random.normal(0, sv),
+                "track_quality": tq,
+                "sigma_pos_m":   sp,
+                "sigma_vel_mps": sv,
+                "is_clutter":    True,
+            })
+
+    return pd.DataFrame(records)
+
+
+# ===========================================================================
 # GERCEKCI SIMULASYON (Fiziksel iyilestirmeler + Global Clutter Kaynakları)
 # ===========================================================================
 
@@ -355,8 +455,8 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
             effective_sigma_pos = math.sqrt(sigma_r**2 + (r_true * SIGMA_AZ_RAD)**2)
 
             records.append({
-                "time":          round(t + radar["delay_s"], 2),
-                "sensor":        radar["name"],
+                "time":           round(t + radar["delay_s"], 2),
+                "sensor":         radar["name"],
                 "local_track_id": local_id,
                 "callsign_true":  cs,
                 "x":  x_meas,
@@ -415,8 +515,8 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
             effective_sigma_pos = math.sqrt(sp**2 + (r_true * SIGMA_AZ_RAD)**2)
             
             records.append({
-                "time":          round(t + radar["delay_s"], 2),
-                "sensor":        radar["name"],
+                "time":           round(t + radar["delay_s"], 2),
+                "sensor":         radar["name"],
                 "local_track_id": f"{radar['name']}-SC{track_id_suffix}",
                 "callsign_true":  f"STATIC_CLUTTER_{ctype}",
                 "x":  x_meas,
@@ -488,8 +588,8 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
             effective_sigma_pos = math.sqrt(sp**2 + (r_true * SIGMA_AZ_RAD)**2)
             
             records.append({
-                "time":          round(t + radar["delay_s"], 2),
-                "sensor":        radar["name"],
+                "time":           round(t + radar["delay_s"], 2),
+                "sensor":         radar["name"],
                 "local_track_id": local_track_id,
                 "callsign_true":  "GHOST_TRACK",
                 "x":  x_meas,
@@ -524,8 +624,8 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
             sp, sv = tq_to_sigma_pos(tq), tq_to_sigma_vel(tq)
             
             records.append({
-                "time":          round(t + radar["delay_s"], 2),
-                "sensor":        radar["name"],
+                "time":           round(t + radar["delay_s"], 2),
+                "sensor":         radar["name"],
                 "local_track_id": f"{radar['name']}-DC{np.random.randint(10000, 99999)}",
                 "callsign_true":  "DYNAMIC_CLUTTER",
                 "x": cx, "y": cy,
@@ -546,11 +646,29 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
 
 def generate_sensor_csvs(
     gt_csv: str = GROUND_TRUTH_CSV,
+    idealize_csv: str = SENSOR_TRACKS_IDEALIZE_CSV,
     gercekci_csv: str = SENSOR_TRACKS_GERCEKCI_CSV,
 ):
     print(f"Ground Truth dosyasi okunuyor: {gt_csv}")
     gt_df = pd.read_csv(gt_csv)
-    print(f"    -> {len(gt_df)} satir yuklendi.\n")
+    print(f"   -> {len(gt_df)} satir yuklendi.\n")
+
+    print("=" * 55)
+    print("IDEALIZE SIMULASYON (orijinal, degistirilmemis mantik)")
+    print("=" * 55)
+    all_idealize = []
+    for radar in RADARS:
+        df_r = simulate_radar_idealize(radar, gt_df)
+        all_idealize.append(df_r)
+        real_c = (df_r["is_clutter"] == False).sum()
+        clut_c = (df_r["is_clutter"] == True).sum()
+        print(f"  {radar['name']}: {real_c} gercek olcum, {clut_c} clutter")
+
+    sensor_idealize = (pd.concat(all_idealize, ignore_index=True)
+                         .sort_values("time").reset_index(drop=True))
+    sensor_idealize.to_csv(idealize_csv, index=False)
+    print(f"\n  -> '{idealize_csv}' kaydedildi "
+          f"({len(sensor_idealize)} toplam kayit)\n")
 
     # =====================================================================
     # GERCEKCI SIMULASYON: Global clutter kaynakları oluştur
@@ -585,7 +703,7 @@ def generate_sensor_csvs(
     print(f"\n  -> '{gercekci_csv}' kaydedildi "
           f"({len(sensor_gercekci)} toplam kayit)\n")
 
-    return gercekci_csv
+    return idealize_csv, gercekci_csv
 
 
 if __name__ == "__main__":

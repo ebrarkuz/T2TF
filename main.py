@@ -10,26 +10,33 @@ from radar_sim import generate_sensor_csvs
 # KONFİGÜRASYON
 # =========================================
 GROUND_TRUTH_CSV = "ground_truth_adsb_multi.csv"
+IDEALIZE_SENSOR_CSV = "radar_sensor_tracks_idealize.csv"
 GERCEKCI_SENSOR_CSV = "radar_sensor_tracks_gercekci.csv"
 
 # Çıktı Dosyaları
+RES_IDEAL_BASIC = "res_ideal_basic.csv"
+RES_IDEAL_ADV = "res_ideal_adv.csv"
 RES_REAL_BASIC = "res_real_basic.csv"
 RES_REAL_ADV = "res_real_adv.csv"
 RES_REAL_ADV_NOCI = "res_real_adv_noci.csv"
 
 
 def step1_generate_data():
-    """Ground truth verisinden gerçekçi radar simülasyon verileri üretir."""
+    """Ground truth verisinden radar simülasyon verileri üretir."""
     print("\n[AŞAMA 1] Simülasyon verileri üretiliyor...")
     generate_sensor_csvs(
         gt_csv=GROUND_TRUTH_CSV,
+        idealize_csv=IDEALIZE_SENSOR_CSV,
         gercekci_csv=GERCEKCI_SENSOR_CSV,
     )
 
 
 def step2_run_scenarios():
-    """Gerçekçi sensör verisi üzerinde temel ve gelişmiş füzyon senaryolarını çalıştırır."""
+    """Temel ve gelişmiş füzyon senaryolarını çalıştırır."""
     print("\n[AŞAMA 2] Füzyon senaryoları çalıştırılıyor...")
+
+    run_basic_fusion(sensor_csv=IDEALIZE_SENSOR_CSV, output_csv=RES_IDEAL_BASIC, verbose=False)
+    run_advanced_fusion(sensor_csv=IDEALIZE_SENSOR_CSV, output_csv=RES_IDEAL_ADV, use_ci=True, verbose=False)
 
     run_basic_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_BASIC, verbose=False)
     run_advanced_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_ADV, use_ci=True, verbose=False)
@@ -49,6 +56,8 @@ def step3_compute_metrics():
 
     gt_df = pd.read_csv(GROUND_TRUTH_CSV)
     dfs = {
+        "İdealize + Temel": _safe_read_csv(RES_IDEAL_BASIC),
+        "İdealize + Gelişmiş (CI)": _safe_read_csv(RES_IDEAL_ADV),
         "Gerçekçi + Temel": _safe_read_csv(RES_REAL_BASIC),
         "Gerçekçi + Gelişmiş (CI)": _safe_read_csv(RES_REAL_ADV),
         "Gerçekçi + Gelişmiş (No-CI)": _safe_read_csv(RES_REAL_ADV_NOCI),
@@ -82,6 +91,8 @@ def step4_compute_target_metrics():
     targets = sorted(gt_df[gt_key].unique())
     
     dfs = {
+        "İdealize + Temel": _safe_read_csv(RES_IDEAL_BASIC),
+        "İdealize + Gelişmiş (CI)": _safe_read_csv(RES_IDEAL_ADV),
         "Gerçekçi + Temel": _safe_read_csv(RES_REAL_BASIC),
         "Gerçekçi + Gelişmiş (CI)": _safe_read_csv(RES_REAL_ADV),
         "Gerçekçi + Gelişmiş (No-CI)": _safe_read_csv(RES_REAL_ADV_NOCI),
@@ -123,4 +134,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    main()          
