@@ -29,7 +29,11 @@ def load_fused_data(csv_path: str) -> pd.DataFrame:
     return df
 
 
-def enu_to_latlon(x: float, y: float, ref_lat: float, ref_lon: float) -> (float, float):
+def build_color_map(values, palette):
+    return {value: palette[idx % len(palette)] for idx, value in enumerate(values)}
+
+
+def enu_to_latlon(x: float, y: float, ref_lat: float, ref_lon: float) -> tuple[float, float]:
     R = 6371000.0
     lat = ref_lat + (y / R) * 180.0 / np.pi
     lon = ref_lon + (x / (R * np.cos(ref_lat * np.pi / 180.0))) * 180.0 / np.pi
@@ -232,17 +236,24 @@ def main():
 
     fused_points = filtered[filtered["sensor_group"] == "Fused"]
     if not fused_points.empty:
-        fig.add_trace(
-            go.Scattermapbox(
-                lat=fused_points["lat"],
-                lon=fused_points["lon"],
-                mode="markers",
-                marker=dict(size=10, color="orange", symbol="circle"),
-                name="Fused",
-                hovertext=fused_points["hover"],
-                hoverinfo="text",
+        fused_palette = px.colors.qualitative.Dark24
+        fused_ids = sorted(fused_points["id"].dropna().astype(str).unique())
+        fused_color_map = build_color_map(fused_ids, fused_palette)
+
+        st.sidebar.write(f"  Fused global ID sayısı: {len(fused_ids)}")
+        for global_id in fused_ids:
+            grp = fused_points[fused_points["id"].astype(str) == global_id].sort_values("time")
+            fig.add_trace(
+                go.Scattermapbox(
+                    lat=grp["lat"],
+                    lon=grp["lon"],
+                    mode="markers",
+                    marker=dict(size=10, color=fused_color_map[global_id], symbol="circle"),
+                    name=f"Fused: {global_id}",
+                    hovertext=grp["hover"],
+                    hoverinfo="text",
+                )
             )
-        )
 
     gt_points = filtered[filtered["sensor_group"] == "Ground Truth"]
     

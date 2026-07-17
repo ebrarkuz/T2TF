@@ -72,9 +72,9 @@ CA_PROCESS_NOISE_INTENSITY = 1.5
 CV_PROCESS_NOISE_INTENSITY = 0.4
 CV_ACCEL_LEAK_Q = 1e-4          # ivme bileseninin sifirdan sapmasina izin verilen minik varyans
 
-GATE_CHI2_4DOF = 18.47
+GATE_CHI2_4DOF = 9.0
 COAST_TIME_LIMIT = 30.0
-CONFIRM_HITS = 2
+CONFIRM_HITS = 3
 DUPLICATE_DIST_M = 50.0
 DUPLICATE_TIME_S = 5.0
 
@@ -499,7 +499,11 @@ def run_imm_fusion(
         mode_str = "IMM (CV+CA) + Covariance Intersection" if use_ci else "IMM (CV+CA) + Standard LMMSE"
         print(f"{mode_str} füzyon çalıştırılıyor: {sensor_csv}")
 
+  # fusion_imm.py, satır 502-505 yerine:
     sensor_df = pd.read_csv(sensor_csv)
+    # Clutter'ları doğrudan eleyelim
+    if "is_clutter" in sensor_df.columns:
+        sensor_df = sensor_df[sensor_df["is_clutter"] != True]
     GlobalTrackIMM._cnt = 0
     fc = FusionCenterIMM(use_ci=use_ci)
     output_records = []
@@ -522,14 +526,19 @@ def run_imm_fusion(
             if gt.status != "CONFIRMED":
                 continue
 
-            if hasattr(gt, "position_history") and len(gt.position_history) >= 2:
-                x1, y1, t1 = gt.position_history[-1]
-                x0, y0, t0 = gt.position_history[-2]
-                dt_hist = float(t1) - float(t0)
-                dist_hist = math.hypot(x1 - x0, y1 - y0)
-                if dt_hist <= DUPLICATE_TIME_S and dist_hist <= DUPLICATE_DIST_M and gt.hits_count < (CONFIRM_HITS + 1):
-                    gt.status = "DELETED"
-                    continue
+            # process_batch sonrası, CONFIRMED track listesi üzerinde çapraz kontrol
+            confirmed = [gt for gt in fc.tracks if gt.status == "CONFIRMED"]
+            to_delete = set()
+            for i in range(len(confirmed)):
+                for j in range(i + 1, len(confirmed)):
+                    a, b = confirmed[i], confirmed[j]
+                    dist = math.hypot(float(a.state[0,0]) - float(b.state[0,0]),
+                                    float(a.state[3,0]) - float(b.state[3,0]))
+                    if dist <= DUPLICATE_DIST_M:
+                        # daha az hit'e / daha düşük existence_prob'a sahip olanı sil
+                        weaker = a if a.hits_count < b.hits_count else b
+                        to_delete.add(weaker.id)
+            fc.tracks = [gt for gt in fc.tracks if gt.id not in to_delete]
 
             sigma_x = math.sqrt(max(float(gt.cov[0, 0]), 1e-6))
             sigma_vx = math.sqrt(max(float(gt.cov[1, 1]), 1e-6))
