@@ -1,4 +1,4 @@
-"""
+﻿"""
 füzyon2.py
 ==========
 Gorevi: radar_sensor_tracks.csv uzerinden Covariance Intersection (CI)
@@ -22,7 +22,8 @@ PROCESS_NOISE_INTENSITY = 1.5  # CA modelinde "Jerk (İvme değişimi)" varyans�
 GATE_CHI2_4DOF = 18.47   
 COAST_TIME_LIMIT = 30.0
 CONFIRM_HITS = 2               # minimum number of updates before a track can be CONFIRMED
-DUPLICATE_DIST_M = 50.0        # if a track appears twice within this distance and short time, treat as spurious
+DUPLICATE_DIST_M = 150.0       # IMM kodundaki gibi genişletildi
+DUPLICATE_VEL_MPS = 30.0       # YENI: Paralel track'lerin maks hız farkı (m/s)
 DUPLICATE_TIME_S = 5.0         # time window for duplicate appearance check (seconds)
 
 TQ_MIN, TQ_MAX = 1, 15
@@ -136,12 +137,12 @@ class GlobalTrack:
         
         # 6D Sabit İvme Durum Geçiş Matrisi
         F = np.array([
-            [1, dt, 0.5 * dt**2, 0,  0,           0],
-            [0,  1,          dt, 0,  0,           0],
-            [0,  0,           1, 0,  0,           0],
+            [1, dt, 0.5 * dt**2, 0,  0,          0],
+            [0,  1,          dt, 0,  0,          0],
+            [0,  0,           1, 0,  0,          0],
             [0,  0,           0, 1, dt, 0.5 * dt**2],
-            [0,  0,           0, 0,  1,          dt],
-            [0,  0,           0, 0,  0,           1]
+            [0,  0,           0, 0,  1,         dt],
+            [0,  0,           0, 0,  0,          1]
         ])
         
         # 6D Süreç Gürültüsü Matrisi
@@ -196,6 +197,91 @@ class FusionCenter:
         self.tracks: List[GlobalTrack] = []
         self.src_map: Dict[Tuple, str] = {}  
         self.use_ci = use_ci
+
+    def _tracks_are_duplicate(self, t1, t2, chi2_thresh=16.0):
+        """
+        İki track'in konumlarını Mahalanobis, hızlarını Öklid ile kıyaslar.
+        chi2_thresh=16.0 yaklaşık %99+ güven aralığına denk gelir (2 serbestlik derecesi için).
+        """
+        # 1. Konum için Mahalanobis Mesafesi (0: x, 3: y)
+        dx = np.array([[float(t1.state[0,0]) - float(t2.state[0,0])],
+                       [float(t1.state[3,0]) - float(t2.state[3,0])]])
+        
+        # Inovasyon Kovaryansı (İki track'in pozisyon belirsizliklerinin toplamı)
+        P_sum = t1.cov[np.ix_([0,3],[0,3])] + t2.cov[np.ix_([0,3],[0,3])]
+        
+        try:
+            d2 = float((dx.T @ np.linalg.inv(P_sum) @ dx).item())
+        except np.linalg.LinAlgError:
+            return False
+
+        # 2. Hız için basit Öklid Mesafesi (1: vx, 4: vy)
+        dvx = float(t1.state[1,0]) - float(t2.state[1,0])
+        dvy = float(t1.state[4,0]) - float(t2.state[4,0])
+        vel_diff = math.hypot(dvx, dvy)
+
+        return d2 < chi2_thresh and vel_diff <= DUPLICATE_VEL_MPS
+
+    def _merge_duplicates(self, current_time):
+        """Birbirine çok yakın (konum ve hız) ve paralel ilerleyen track'leri birleştirir."""
+        confirmed_tracks = [gt for gt in self.tracks if gt.status == "CONFIRMED"]
+        tentative_tracks = [gt for gt in self.tracks if gt.status == "TENTATIVE"]
+        to_delete = set()
+        
+        # ==========================================
+        # 1. Aşama: CONFIRMED <-> CONFIRMED Kontrolü
+        # ==========================================
+        for i in range(len(confirmed_tracks)):
+            for j in range(i + 1, len(confirmed_tracks)):
+                t1, t2 = confirmed_tracks[i], confirmed_tracks[j]
+                
+                if t1.id in to_delete or t2.id in to_delete:
+                    continue
+                    
+                if self._tracks_are_duplicate(t1, t2, chi2_thresh=16.0):
+                    # Hangisini tutacağımızı seç (hit sayısı veya olasılığa göre)
+                    if t1.hits_count > t2.hits_count or (t1.hits_count == t2.hits_count and t1.existence_prob >= t2.existence_prob):
+                        keeper, weaker = t1, t2
+                    else:
+                        keeper, weaker = t2, t1
+                        
+                    # Zayıfın verilerini güçlüye devret
+                    keeper.sources.update(weaker.sources)
+                    keeper.source_radar_names.update(weaker.source_radar_names)
+                    keeper.source_measurement_details.update(weaker.source_measurement_details)
+                    
+                    for src_key, track_id in list(self.src_map.items()):
+                        if track_id == weaker.id:
+                            self.src_map[src_key] = keeper.id
+                            
+                    print(f"[MERGE CONFIRMED] t={current_time:.1f} | SİLİNEN: {weaker.id} ({weaker.hits_count} hit) -> TUTULAN: {keeper.id} ({keeper.hits_count} hit)")
+                    to_delete.add(weaker.id)
+
+        # ==========================================
+        # 2. Aşama: CONFIRMED <-> TENTATIVE Kontrolü (Erken Temizlik)
+        # ==========================================
+        for c in confirmed_tracks:
+            if c.id in to_delete:
+                continue
+            for t in tentative_tracks:
+                if t.id in to_delete:
+                    continue
+
+                if self._tracks_are_duplicate(c, t, chi2_thresh=16.0):
+                    # TENTATIVE her zaman silinir, CONFIRMED tutulur
+                    c.sources.update(t.sources)
+                    c.source_radar_names.update(t.source_radar_names)
+                    c.source_measurement_details.update(t.source_measurement_details)
+
+                    for src_key, track_id in list(self.src_map.items()):
+                        if track_id == t.id:
+                            self.src_map[src_key] = c.id
+
+                    print(f"[MERGE TENTATIVE] t={current_time:.1f} | PARAZİT EMİLDİ: {t.id} -> ANA İZ: {c.id}")
+                    to_delete.add(t.id)
+
+        # Silinecekleri ana listeden çıkar
+        self.tracks = [gt for gt in self.tracks if gt.id not in to_delete]
 
     def process_batch(self, t, measurements):
         for gt in self.tracks: gt.propagate(t)
@@ -269,6 +355,9 @@ class FusionCenter:
             self.tracks.append(ng)
             self.src_map[m["src"]] = ng.id
 
+        # --- YENI ADIM: Döngü sonunda duplicate track'leri temizle/birleştir ---
+        self._merge_duplicates(t)
+
 # ===========================================================================
 # ANA YURUTME
 # ===========================================================================
@@ -304,15 +393,11 @@ def run_advanced_fusion(
 
         for gt in fc.tracks:
             if gt.status == "CONFIRMED":
-                if hasattr(gt, 'position_history') and len(gt.position_history) >= 2:
-                    x1, y1, t1 = gt.position_history[-1]
-                    x0, y0, t0 = gt.position_history[-2]
-                    dt_hist = float(t1) - float(t0)
-                    dist_hist = math.hypot(x1 - x0, y1 - y0)
-                    if dt_hist <= DUPLICATE_TIME_S and dist_hist <= DUPLICATE_DIST_M and gt.hits_count < (CONFIRM_HITS + 1):
-                        gt.status = "DELETED"
-                        continue
-                        
+                
+                # Eski hatalı ve sınırlı olan duplicate check (mesafe/history kontrolü) 
+                # buradan silinmiştir. Bu işlem artık FusionCenter içindeki
+                # _merge_duplicates fonksiyonunda çok daha güvenli yapılmaktadır.
+
                 # 6D Endeks Düzeltmeleri Uygulandı (3 ve 4. indeksler)
                 sigma_x = math.sqrt(max(float(gt.cov[0, 0]), 1e-6))
                 sigma_vx = math.sqrt(max(float(gt.cov[1, 1]), 1e-6))
