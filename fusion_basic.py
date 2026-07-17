@@ -10,6 +10,10 @@ TQ_MIN, TQ_MAX = 1, 15
 SIGMA_POS_MAX, SIGMA_POS_MIN = 1500.0, 30.0
 SIGMA_VEL_MAX, SIGMA_VEL_MIN = 25.0, 0.5
 
+# YENİ: Birleştirme (Merge) Eşikleri
+DUPLICATE_DIST_M = 150.0
+DUPLICATE_VEL_MPS = 30.0
+
 def tq_to_cov(tq):
     """TQ değerini 4x4 ölçüm kovaryans matrisine dönüştürür."""
     tq = np.clip(tq, TQ_MIN, TQ_MAX)
@@ -30,6 +34,9 @@ class GlobalTrack:
         self.time = time
         self.state = state.reshape(4, 1) # [x, vx, y, vy]^T
         self.cov = cov
+        
+        # YENİ: Birleştirme (merging) önceliği için hit sayacı
+        self.hits_count = 1
         
         # Existence Probability (Var olma olasılığı) Başlatma
         # TQ 1-15 aralığını 0.1 ile 0.8 arasında bir başlangıç olasılığına map ediyoruz
@@ -79,6 +86,69 @@ class FusionCenter:
     def __init__(self):
         self.global_tracks = []
         self.rho = 0.4 # Raporda belirtilen çapraz kovaryans katsayısı
+
+    def _tracks_are_duplicate(self, t1, t2, chi2_thresh=16.0):
+        """
+        İki track'in konumlarını Mahalanobis, hızlarını Öklid ile kıyaslar.
+        Dikkat: 4D durumda pozisyonlar 0 ve 2, hızlar 1 ve 3. indekslerdedir.
+        """
+        # 1. Konum için Mahalanobis Mesafesi (0: x, 2: y)
+        dx = np.array([[float(t1.state[0,0]) - float(t2.state[0,0])],
+                       [float(t1.state[2,0]) - float(t2.state[2,0])]])
+        
+        P_sum = t1.cov[np.ix_([0,2],[0,2])] + t2.cov[np.ix_([0,2],[0,2])]
+        
+        try:
+            d2 = float((dx.T @ np.linalg.inv(P_sum) @ dx).item())
+        except np.linalg.LinAlgError:
+            return False
+
+        # 2. Hız için basit Öklid Mesafesi (1: vx, 3: vy)
+        dvx = float(t1.state[1,0]) - float(t2.state[1,0])
+        dvy = float(t1.state[3,0]) - float(t2.state[3,0])
+        vel_diff = math.hypot(dvx, dvy)
+
+        return d2 < chi2_thresh and vel_diff <= DUPLICATE_VEL_MPS
+
+    def _merge_duplicates(self, current_time):
+        """Birbirine çok yakın (konum ve hız) ve paralel ilerleyen track'leri birleştirir."""
+        confirmed_tracks = [gt for gt in self.global_tracks if gt.state_status == "CONFIRMED"]
+        tentative_tracks = [gt for gt in self.global_tracks if gt.state_status == "TENTATIVE"]
+        to_delete = set()
+        
+        # 1. Aşama: CONFIRMED <-> CONFIRMED Kontrolü
+        for i in range(len(confirmed_tracks)):
+            for j in range(i + 1, len(confirmed_tracks)):
+                t1, t2 = confirmed_tracks[i], confirmed_tracks[j]
+                
+                if t1.id in to_delete or t2.id in to_delete:
+                    continue
+                    
+                if self._tracks_are_duplicate(t1, t2, chi2_thresh=16.0):
+                    if t1.hits_count > t2.hits_count or (t1.hits_count == t2.hits_count and t1.existence_prob >= t2.existence_prob):
+                        keeper, weaker = t1, t2
+                    else:
+                        keeper, weaker = t2, t1
+                        
+                    keeper.hits_count += weaker.hits_count # Çalınan ölçüm gücünü geri aktar
+                    print(f"[MERGE CONFIRMED] t={current_time:.1f} | SİLİNEN: {weaker.id} ({weaker.hits_count} hit) -> TUTULAN: {keeper.id}")
+                    to_delete.add(weaker.id)
+
+        # 2. Aşama: CONFIRMED <-> TENTATIVE Kontrolü (Erken Temizlik)
+        for c in confirmed_tracks:
+            if c.id in to_delete:
+                continue
+            for t in tentative_tracks:
+                if t.id in to_delete:
+                    continue
+
+                if self._tracks_are_duplicate(c, t, chi2_thresh=16.0):
+                    c.hits_count += t.hits_count
+                    print(f"[MERGE TENTATIVE] t={current_time:.1f} | PARAZİT EMİLDİ: {t.id} -> ANA İZ: {c.id}")
+                    to_delete.add(t.id)
+
+        # Silinecekleri ana listeden çıkar
+        self.global_tracks = [gt for gt in self.global_tracks if gt.id not in to_delete]
 
     def process_measurement(self, meas_time, local_state, local_cov, local_tq, gate_threshold=25.0):
         # 1. Mevcut global trackleri ölçüm zamanına senkronize et
@@ -157,11 +227,17 @@ class FusionCenter:
                     gt.state = gt.state + K @ (local_state - gt.state)
                     gt.cov = Pi - K @ (Pi - P_ij).T
                     
+                    # YENİ: Hit sayacını artır
+                    gt.hits_count += 1
+                    
                     # Existence Probability Güncellemesi (Bayesian yaklaşımına benzer)
                     # Yüksek TQ'lu bir ölçüm geldiyse olasılık artar
                     meas_prob = 0.5 + 0.45 * ((local_tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
                     gt.existence_prob = gt.existence_prob + (1 - gt.existence_prob) * meas_prob
                     gt.update_status()
+                    
+                    # Eşleştirme yapıldı, fonksiyonu sonlandırmadan önce merge işlemini çağır
+                    self._merge_duplicates(meas_time)
                     return
                 except np.linalg.LinAlgError:
                     pass # Tersi alınamazsa yeni track açılışına düş
@@ -169,6 +245,9 @@ class FusionCenter:
         # 4. Eşleşme bulunamadıysa Yeni Track başlat (Adım 6 - Track Başlatma)
         new_gt = GlobalTrack(meas_time, local_state, local_cov, local_tq)
         self.global_tracks.append(new_gt)
+        
+        # Döngü sonu merge kontrolü
+        self._merge_duplicates(meas_time)
 
 
 # ---------------------------------------------------------
