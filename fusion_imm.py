@@ -72,7 +72,7 @@ CA_PROCESS_NOISE_INTENSITY = 1.5
 CV_PROCESS_NOISE_INTENSITY = 0.4
 CV_ACCEL_LEAK_Q = 1e-4          # ivme bileseninin sifirdan sapmasina izin verilen minik varyans
 
-GATE_CHI2_4DOF = 9.0
+GATE_CHI2_4DOF = 16.0
 COAST_TIME_LIMIT = 30.0
 CONFIRM_HITS = 3
 DUPLICATE_DIST_M = 150.0
@@ -88,7 +88,7 @@ SIGMA_VEL_MAX, SIGMA_VEL_MIN = 25.0, 0.5
 # sicramalar yerine kademeli gecis), ama manevraya makul hizda tepki verir.
 MODEL_NAMES = ["CV", "CA"]
 TRANS_PROB = np.array([
-    [0.85, 0.15],   # CV -> CV, CV -> CA
+    [0.70, 0.30],   # CV -> CV, CV -> CA
     [0.25, 0.75],   # CA -> CV, CA -> CA
 ])
 INIT_MODE_PROB = np.array([0.5, 0.5])  # baslangicta iki modele esit guven

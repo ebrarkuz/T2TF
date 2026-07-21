@@ -14,11 +14,13 @@ scenarios = [
     ('res_real_adv.csv', 'Gercekçi + Advanced (CI)'),
 ]
 
-targets = ['HEDEF_1', 'HEDEF_2', 'HEDEF_3']
+gt_key = 'callsign' if 'callsign' in gt_df.columns else 'target'
+targets = sorted(gt_df[gt_key].dropna().unique())
 
 print("\n" + "="*120)
 print(" "*35 + "PER-TARGET FUSION METRICS (with Acceleration Model)")
 print("="*120 + "\n")
+print(f"Detected targets: {targets}\n")
 
 for scenario_file, scenario_name in scenarios:
     print(f"\n{scenario_name}:")
