@@ -324,18 +324,30 @@ class FusionCenterIMM3:
         # [YENI]: Kopan veya silinen hedeflerin belirli bir süre tutulduğu hafıza
         self.recently_deleted: List[dict] = [] 
 
-    def _tracks_are_duplicate(self, t1, t2, chi2_thresh=16.0):
+    def _tracks_are_duplicate(self, t1, t2, chi2_thresh=36.0):
+        # 1. GERÇEK FİZİKSEL MESAFE (Öklid)
+        dist = math.hypot(float(t1.state[0, 0]) - float(t2.state[0, 0]), 
+                          float(t1.state[3, 0]) - float(t2.state[3, 0]))
+        
+        # 2. HIZ FARKI
+        dvx = float(t1.state[1, 0]) - float(t2.state[1, 0])
+        dvy = float(t1.state[4, 0]) - float(t2.state[4, 0])
+        vel_diff = math.hypot(dvx, dvy)
+
+        # ZORUNLU BİRLEŞTİRME: Eğer izler birbirine DUPLICATE_DIST_M'den yakınsa 
+        # ve hızları tolere edilebilir seviyedeyse, kovaryansa hiç bakma, KESİN BİRLEŞTİR!
+        if dist < DUPLICATE_DIST_M and vel_diff <= DUPLICATE_VEL_MPS:
+            return True
+
+        # Eğer fiziksel mesafeden geçemedilerse (sınırdalarsa), Mahalanobis'e son bir şans ver
         dx = np.array([[float(t1.state[0, 0]) - float(t2.state[0, 0])],
                        [float(t1.state[3, 0]) - float(t2.state[3, 0])]])
         P_sum = t1.cov[np.ix_([0, 3], [0, 3])] + t2.cov[np.ix_([0, 3], [0, 3])]
         try:
             d2 = float((dx.T @ np.linalg.inv(P_sum) @ dx).item())
+            return d2 < chi2_thresh and vel_diff <= DUPLICATE_VEL_MPS
         except np.linalg.LinAlgError:
             return False
-        dvx = float(t1.state[1, 0]) - float(t2.state[1, 0])
-        dvy = float(t1.state[4, 0]) - float(t2.state[4, 0])
-        vel_diff = math.hypot(dvx, dvy)
-        return d2 < chi2_thresh and vel_diff <= DUPLICATE_VEL_MPS
 
     def _merge_duplicates(self, current_time):
         confirmed_tracks = [gt for gt in self.tracks if gt.status == "CONFIRMED"]
