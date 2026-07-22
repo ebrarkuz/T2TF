@@ -48,7 +48,7 @@ df4 = df1.copy()
 df4["callsign"] = "HEDEF_4"
 
 # Hedef 4 diğerlerinden ayrılsın diye X'te aynalanmış uçsun, Y'de ise çok sert S'ler çizsin
-T_boleni_sharp = 25.0  # Çok sık manevra (Dönüş yarıçapı dar)
+T_boleni_sharp = 50.0  # Çok sık manevra (Dönüş yarıçapı dar)
 Genlik_sharp = 15000.0  # Geniş savrulma (Şiddetli ivme)
 
 df4["x"] = merkez_x - (df1["x"] - merkez_x)

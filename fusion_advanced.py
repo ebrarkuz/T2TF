@@ -254,7 +254,7 @@ class FusionCenter:
                         if track_id == weaker.id:
                             self.src_map[src_key] = keeper.id
                             
-                    print(f"[MERGE CONFIRMED] t={current_time:.1f} | SİLİNEN: {weaker.id} ({weaker.hits_count} hit) -> TUTULAN: {keeper.id} ({keeper.hits_count} hit)")
+                    
                     to_delete.add(weaker.id)
 
         # ==========================================
@@ -277,7 +277,7 @@ class FusionCenter:
                         if track_id == t.id:
                             self.src_map[src_key] = c.id
 
-                    print(f"[MERGE TENTATIVE] t={current_time:.1f} | PARAZİT EMİLDİ: {t.id} -> ANA İZ: {c.id}")
+                    
                     to_delete.add(t.id)
 
         # Silinecekleri ana listeden çıkar

@@ -131,7 +131,7 @@ class FusionCenter:
                         keeper, weaker = t2, t1
                         
                     keeper.hits_count += weaker.hits_count # Çalınan ölçüm gücünü geri aktar
-                    print(f"[MERGE CONFIRMED] t={current_time:.1f} | SİLİNEN: {weaker.id} ({weaker.hits_count} hit) -> TUTULAN: {keeper.id}")
+                    
                     to_delete.add(weaker.id)
 
         # 2. Aşama: CONFIRMED <-> TENTATIVE Kontrolü (Erken Temizlik)
@@ -144,7 +144,7 @@ class FusionCenter:
 
                 if self._tracks_are_duplicate(c, t, chi2_thresh=16.0):
                     c.hits_count += t.hits_count
-                    print(f"[MERGE TENTATIVE] t={current_time:.1f} | PARAZİT EMİLDİ: {t.id} -> ANA İZ: {c.id}")
+                    
                     to_delete.add(t.id)
 
         # Silinecekleri ana listeden çıkar
