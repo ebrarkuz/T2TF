@@ -41,7 +41,7 @@ np.random.seed(42)
 TQ_MIN, TQ_MAX = 1, 15
 SIGMA_POS_MAX, SIGMA_POS_MIN = 1500.0, 30.0
 SIGMA_VEL_MAX, SIGMA_VEL_MIN = 25.0, 0.5
-GROUND_TRUTH_CSV = "ground_truth_adsb_multi.csv"
+GROUND_TRUTH_CSV = "ground_truth_adsb.csv"
 SENSOR_TRACKS_IDEALIZE_CSV = "radar_sensor_tracks_idealize.csv"
 SENSOR_TRACKS_GERCEKCI_CSV = "radar_sensor_tracks_gercekci.csv"
 
@@ -76,16 +76,20 @@ RADARS = [
         "pd_min":          0.50,
         "bias_x":          15.0,
         "bias_y":         -10.0,
+        "bias_z":           5.0,
         "bias_drift_std":  0.05,
         "clutter_rate":    0.000075,
         "n_static_clutter":2, 
         "static_visible_prob": 0.01,
         "pos_x":           0.0,
         "pos_y":           0.0,
+        "pos_z":           0.0,
         "max_range_m":     500000.0,
         "fov_center_deg":  None,
         "fov_half_deg":    180.0,
-        "clutter_box":    (-400000, 400000, -400000, 400000),
+        "fov_el_center_deg": 0.0,
+        "fov_el_half_deg": 90.0,
+        "clutter_box":    (-400000, 400000, -400000, 400000, 0, 15000),
     },
     {
         "name":            "RADAR_B",
@@ -100,16 +104,20 @@ RADARS = [
         "pd_min":          0.40,
         "bias_x":         -25.0,
         "bias_y":          20.0,
+        "bias_z":          -7.0,
         "bias_drift_std":  0.08,
         "clutter_rate":    0.00005,
         "n_static_clutter":3,
         "static_visible_prob": 0.00875,
         "pos_x":           50000.0,
         "pos_y":          -5000.0,
+        "pos_z":           0.0,
         "max_range_m":     500000.0,
         "fov_center_deg":  None,
         "fov_half_deg":    180.0,
-        "clutter_box":    (-400000, 400000, -400000, 400000),
+        "fov_el_center_deg": 0.0,
+        "fov_el_half_deg": 90.0,
+        "clutter_box":    (-400000, 400000, -400000, 400000, 0, 15000),
     },
     {
         "name":            "RADAR_C",
@@ -124,16 +132,20 @@ RADARS = [
         "pd_min":          0.30,
         "bias_x":          40.0,
         "bias_y":          35.0,
+        "bias_z":          12.0,
         "bias_drift_std":  0.12,
         "clutter_rate":    0.000025,
         "n_static_clutter":1,  
         "static_visible_prob": 0.00575,
         "pos_x":           15000.0,
         "pos_y":           60000.0,
+        "pos_z":           0.0,
         "max_range_m":     500000.0,
         "fov_center_deg":  None,
         "fov_half_deg":    180.0,
-        "clutter_box":     (-100000, 100000, -100000, 100000),
+        "fov_el_center_deg": 0.0,
+        "fov_el_half_deg": 90.0,
+        "clutter_box":     (-100000, 100000, -100000, 100000, 0, 12000),
     },
 ]
 
@@ -146,14 +158,21 @@ def _angle_diff_deg(a, b):
     return (a - b + 180.0) % 360.0 - 180.0
 
 
-def in_fov(radar, x, y):
-    dx, dy = x - radar["pos_x"], y - radar["pos_y"]
-    rng = math.hypot(dx, dy)
+def in_fov(radar, x, y, z=0.0):
+    dx = x - radar["pos_x"]
+    dy = y - radar["pos_y"]
+    dz = z - radar.get("pos_z", 0.0)
+    rng = math.sqrt(dx * dx + dy * dy + dz * dz)
     if radar["max_range_m"] is not None and rng > radar["max_range_m"]:
         return False
     if radar["fov_center_deg"] is not None:
         bearing = math.degrees(math.atan2(dy, dx))
         if abs(_angle_diff_deg(bearing, radar["fov_center_deg"])) > radar["fov_half_deg"]:
+            return False
+    if radar.get("fov_el_half_deg") is not None:
+        horiz_rng = math.hypot(dx, dy)
+        elev = math.degrees(math.atan2(dz, max(horiz_rng, 1e-6)))
+        if abs(_angle_diff_deg(elev, radar.get("fov_el_center_deg", 0.0))) > radar["fov_el_half_deg"]:
             return False
     return True
 
@@ -167,10 +186,11 @@ def is_maneuvering(callsign, t, gt_df, accel_threshold=5.0):
     return math.hypot(dvx, dvy) > accel_threshold
 
 
-def range_dependent_pd(radar, x, y):
+def range_dependent_pd(radar, x, y, z=0.0):
     dx = x - radar["pos_x"]
     dy = y - radar["pos_y"]
-    rng = math.hypot(dx, dy)
+    dz = z - radar.get("pos_z", 0.0)
+    rng = math.sqrt(dx * dx + dy * dy + dz * dz)
     ref_r = radar["pd_ref_range_m"]
     max_r = radar["max_range_m"]
     if rng <= ref_r:
@@ -182,14 +202,23 @@ def range_dependent_pd(radar, x, y):
 
 
 SIGMA_AZ_RAD = math.radians(0.05)   # tipik azimut hatasi
+SIGMA_EL_RAD = math.radians(0.05)   # tipik elevasyon hatasi
+
+
+def _interp_axis(sub, t, col, default=0.0):
+    if col not in sub.columns:
+        return float(default)
+    return float(np.interp(t, sub["time"], sub[col]))
 
 
 # ===========================================================================
 # GLOBAL CLUTTER KAYNAKLARI (Binalar, Hava Olayları vb.)
 # ===========================================================================
 
-def generate_global_static_clutter(n_points: int = 15, 
-                                   clutter_box: tuple = (-300000, 300000, -300000, 300000)):
+def generate_global_static_clutter(
+    n_points: int = 15,
+    clutter_box: tuple = (-300000, 300000, -300000, 300000, 0, 15000),
+):
     """
     Simülasyonun başında, harita üzerinde sabit koordinatlara sahip global bir statik clutter
     listesi oluştur. Bu noktalar binalar, dağlar, kalıcı metal yapılar vb. temsil eder.
@@ -200,10 +229,10 @@ def generate_global_static_clutter(n_points: int = 15,
         n_points: Statik clutter noktasının sayısı (default: 15)
         clutter_box: (xmin, xmax, ymin, ymax) - clutter alanının coğrafi sınırları
     
-    Dönüş: [(x, y, clutter_type), ...] listesi
+    Dönüş: [(x, y, z, clutter_type), ...] listesi
            clutter_type: 'building', 'terrain', 'metal', 'mountain'
     """
-    xmin, xmax, ymin, ymax = clutter_box
+    xmin, xmax, ymin, ymax, zmin, zmax = clutter_box
     static_points = []
     
     clutter_types = ['building', 'terrain', 'metal', 'mountain']
@@ -211,14 +240,20 @@ def generate_global_static_clutter(n_points: int = 15,
     for _ in range(n_points):
         cx = np.random.uniform(xmin, xmax)
         cy = np.random.uniform(ymin, ymax)
+        cz = np.random.uniform(zmin, zmax)
         ctype = np.random.choice(clutter_types)
-        static_points.append((cx, cy, ctype))
+        static_points.append((cx, cy, cz, ctype))
     
     return static_points
 
 
-def generate_ghost_tracks(gt_df, time_start: float = 50.0, time_end: float = 90.0,
-                          n_ghosts: int = 3, speed_range: tuple = (5.0, 15.0)):
+def generate_ghost_tracks(
+    gt_df,
+    time_start: float = 50.0,
+    time_end: float = 90.0,
+    n_ghosts: int = 3,
+    speed_range: tuple = (5.0, 15.0),
+):
     """
     Ground truth dışında, geçici olarak yaşayan "Hayalet Rotalar" (Ghost Tracks) oluştur.
     Bunlar kuş sürüleri, bulut sistemleri veya hava durumu olaylarını temsil edebilir.
@@ -231,9 +266,9 @@ def generate_ghost_tracks(gt_df, time_start: float = 50.0, time_end: float = 90.
         n_ghosts: Hayalet rota sayısı (default: 3)
         speed_range: (min_speed_m/s, max_speed_m/s) - tipik olarak (5, 15)
     
-    Dönüş: [(t_start, t_end, x_traj, y_traj, vx, vy), ...] listesi
-           x_traj, y_traj: lambda fonksiyonları, zamana göre konum hesaplarlar
-           vx, vy: sabit hız bileşenleri
+        Dönüş: [(t_start, t_end, x_traj, y_traj, z_traj, vx, vy, vz), ...] listesi
+            x_traj, y_traj, z_traj: lambda fonksiyonları, zamana göre konum hesaplarlar
+            vx, vy, vz: sabit hız bileşenleri
     """
     t_min = gt_df["time"].min()
     t_max = gt_df["time"].max()
@@ -248,18 +283,21 @@ def generate_ghost_tracks(gt_df, time_start: float = 50.0, time_end: float = 90.
         # Rastgele başlangıç konumu (-200km, +200km)
         x0 = np.random.uniform(-200000, 200000)
         y0 = np.random.uniform(-200000, 200000)
+        z0 = np.random.uniform(500.0, 10000.0)
         
         # Rastgele hız yönü ve büyüklüğü (düşük hız: kuş/bulut benzeri)
         speed = np.random.uniform(speed_range[0], speed_range[1])
         angle = np.random.uniform(0, 2 * np.pi)
         vx = speed * np.cos(angle)
         vy = speed * np.sin(angle)
+        vz = np.random.normal(0.0, 1.0)
         
         # Lineer hareket modeli: x(t) = x0 + vx*(t - t_start), y(t) = y0 + vy*(t - t_start)
         x_traj = lambda t, x0=x0, vx=vx, ts=t_start_clipped: x0 + vx * (t - ts)
         y_traj = lambda t, y0=y0, vy=vy, ts=t_start_clipped: y0 + vy * (t - ts)
+        z_traj = lambda t, z0=z0, vz=vz, ts=t_start_clipped: z0 + vz * (t - ts)
         
-        ghost_tracks.append((t_start_clipped, t_end_clipped, x_traj, y_traj, vx, vy))
+        ghost_tracks.append((t_start_clipped, t_end_clipped, x_traj, y_traj, z_traj, vx, vy, vz))
     
     return ghost_tracks
 
@@ -293,10 +331,12 @@ def simulate_radar_idealize(radar, gt_df):
 
             x_true = float(np.interp(t, sub["time"], sub["x"]))
             y_true = float(np.interp(t, sub["time"], sub["y"]))
+            z_true = _interp_axis(sub, t, "z", 0.0)
             vx_true = float(np.interp(t, sub["time"], sub["vx"]))
             vy_true = float(np.interp(t, sub["time"], sub["vy"]))
+            vz_true = _interp_axis(sub, t, "vz", 0.0)
 
-            if not in_fov(radar, x_true, y_true) or np.random.rand() > radar["pd"]:
+            if not in_fov(radar, x_true, y_true, z_true) or np.random.rand() > radar["pd"]:
                 dropped = True
                 continue
 
@@ -321,23 +361,29 @@ def simulate_radar_idealize(radar, gt_df):
                 "callsign_true":  cs,
                 "x":  x_true + radar["bias_x"] + np.random.normal(0, sp),
                 "y":  y_true + radar["bias_y"] + np.random.normal(0, sp),
+                "z":  z_true + radar.get("bias_z", 0.0) + np.random.normal(0, sp),
                 "vx": vx_true + np.random.normal(0, sv),
                 "vy": vy_true + np.random.normal(0, sv),
+                "vz": vz_true + np.random.normal(0, sv),
                 "track_quality": tq,
                 "sigma_pos_m":   sp,
                 "sigma_vel_mps": sv,
                 "is_clutter":    False,
             })
 
-    xmin, xmax, ymin, ymax = radar["clutter_box"]
+    xmin, xmax, ymin, ymax, zmin, zmax = radar["clutter_box"]
     t = np.random.uniform(0, radar["revisit_mean_s"])
     while t <= t_max:
         t += max(0.1, np.random.normal(radar["revisit_mean_s"], radar["revisit_jitter"]))
         if t > t_max:
             break
         for _ in range(np.random.poisson(radar["clutter_rate"])):
-            cx, cy = np.random.uniform(xmin, xmax), np.random.uniform(ymin, ymax)
-            if not in_fov(radar, cx, cy):
+            cx, cy, cz = (
+                np.random.uniform(xmin, xmax),
+                np.random.uniform(ymin, ymax),
+                np.random.uniform(zmin, zmax),
+            )
+            if not in_fov(radar, cx, cy, cz):
                 continue
             tq = int(np.clip(np.random.randint(1, max(2, radar["base_tq"] - 3)), TQ_MIN, TQ_MAX))
             sp, sv = tq_to_sigma_pos(tq), tq_to_sigma_vel(tq)
@@ -346,9 +392,10 @@ def simulate_radar_idealize(radar, gt_df):
                 "sensor":         radar["name"],
                 "local_track_id": f"{radar['name']}-CL{np.random.randint(10000, 99999)}",
                 "callsign_true":  "CLUTTER",
-                "x": cx, "y": cy,
+                "x": cx, "y": cy, "z": cz,
                 "vx": np.random.normal(0, sv),
                 "vy": np.random.normal(0, sv),
+                "vz": np.random.normal(0, sv),
                 "track_quality": tq,
                 "sigma_pos_m":   sp,
                 "sigma_vel_mps": sv,
@@ -385,6 +432,7 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
 
     current_bias_x = float(radar["bias_x"])
     current_bias_y = float(radar["bias_y"])
+    current_bias_z = float(radar.get("bias_z", 0.0))
 
     # =========================================================================
     # 1. NORMAL UÇAK ÖLÇÜMLERİ (Ground Truth)
@@ -405,14 +453,17 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
 
             x_true = float(np.interp(t, sub["time"], sub["x"]))
             y_true = float(np.interp(t, sub["time"], sub["y"]))
+            z_true = _interp_axis(sub, t, "z", 0.0)
             vx_true = float(np.interp(t, sub["time"], sub["vx"]))
             vy_true = float(np.interp(t, sub["time"], sub["vy"]))
+            vz_true = _interp_axis(sub, t, "vz", 0.0)
 
             current_bias_x += np.random.normal(0, radar["bias_drift_std"])
             current_bias_y += np.random.normal(0, radar["bias_drift_std"])
+            current_bias_z += np.random.normal(0, radar["bias_drift_std"])
 
-            effective_pd = range_dependent_pd(radar, x_true, y_true)
-            if not in_fov(radar, x_true, y_true) or np.random.rand() > effective_pd:
+            effective_pd = range_dependent_pd(radar, x_true, y_true, z_true)
+            if not in_fov(radar, x_true, y_true, z_true) or np.random.rand() > effective_pd:
                 dropped = True
                 continue
 
@@ -433,26 +484,60 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
             # [YEN5] POLAR GURULTU MODELI (Gercek radar olcumu)
             dx_true = x_true - radar["pos_x"]
             dy_true = y_true - radar["pos_y"]
-            r_true = math.hypot(dx_true, dy_true)
+            dz_true = z_true - radar.get("pos_z", 0.0)
+            r_true = math.sqrt(dx_true * dx_true + dy_true * dy_true + dz_true * dz_true)
             theta_true = math.atan2(dy_true, dx_true)
+            phi_true = math.atan2(dz_true, max(math.hypot(dx_true, dy_true), 1e-6))
 
             r_meas = r_true + np.random.normal(0, sigma_r)
             theta_meas = theta_true + np.random.normal(0, SIGMA_AZ_RAD)
+            phi_meas = phi_true + np.random.normal(0, SIGMA_EL_RAD)
 
-            x_meas = radar["pos_x"] + current_bias_x + r_meas * math.cos(theta_meas)
-            y_meas = radar["pos_y"] + current_bias_y + r_meas * math.sin(theta_meas)
+            x_meas = radar["pos_x"] + current_bias_x + r_meas * math.cos(phi_meas) * math.cos(theta_meas)
+            y_meas = radar["pos_y"] + current_bias_y + r_meas * math.cos(phi_meas) * math.sin(theta_meas)
+            z_meas = radar.get("pos_z", 0.0) + current_bias_z + r_meas * math.sin(phi_meas)
 
             # [YEN6] DOPPLER HIZ MODELI
-            v_rad_true = vx_true * math.cos(theta_true) + vy_true * math.sin(theta_true)
-            v_cross_true = -vx_true * math.sin(theta_true) + vy_true * math.cos(theta_true)
+            ur_true = np.array([
+                math.cos(phi_true) * math.cos(theta_true),
+                math.cos(phi_true) * math.sin(theta_true),
+                math.sin(phi_true),
+            ])
+            uth_true = np.array([-math.sin(theta_true), math.cos(theta_true), 0.0])
+            uph_true = np.array([
+                -math.sin(phi_true) * math.cos(theta_true),
+                -math.sin(phi_true) * math.sin(theta_true),
+                math.cos(phi_true),
+            ])
+            v_true = np.array([vx_true, vy_true, vz_true])
+            v_rad_true = float(v_true @ ur_true)
+            v_cross_true = float(v_true @ uth_true)
+            v_vert_true = float(v_true @ uph_true)
             
             v_rad_meas = v_rad_true + np.random.normal(0, sv)
             v_cross_meas = v_cross_true + np.random.normal(0, sv * 4.0)
+            v_vert_meas = v_vert_true + np.random.normal(0, sv * 2.0)
 
-            vx_meas = v_rad_meas * math.cos(theta_meas) - v_cross_meas * math.sin(theta_meas)
-            vy_meas = v_rad_meas * math.sin(theta_meas) + v_cross_meas * math.cos(theta_meas)
+            ur_meas = np.array([
+                math.cos(phi_meas) * math.cos(theta_meas),
+                math.cos(phi_meas) * math.sin(theta_meas),
+                math.sin(phi_meas),
+            ])
+            uth_meas = np.array([-math.sin(theta_meas), math.cos(theta_meas), 0.0])
+            uph_meas = np.array([
+                -math.sin(phi_meas) * math.cos(theta_meas),
+                -math.sin(phi_meas) * math.sin(theta_meas),
+                math.cos(phi_meas),
+            ])
+            v_meas = v_rad_meas * ur_meas + v_cross_meas * uth_meas + v_vert_meas * uph_meas
 
-            effective_sigma_pos = math.sqrt(sigma_r**2 + (r_true * SIGMA_AZ_RAD)**2)
+            vx_meas = float(v_meas[0])
+            vy_meas = float(v_meas[1])
+            vz_meas = float(v_meas[2])
+
+            effective_sigma_pos = math.sqrt(
+                sigma_r**2 + (r_true * SIGMA_AZ_RAD) ** 2 + (r_true * SIGMA_EL_RAD) ** 2
+            )
 
             records.append({
                 "time":           round(t + radar["delay_s"], 2),
@@ -461,8 +546,10 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
                 "callsign_true":  cs,
                 "x":  x_meas,
                 "y":  y_meas,
+                "z":  z_meas,
                 "vx": vx_meas,
                 "vy": vy_meas,
+                "vz": vz_meas,
                 "track_quality": tq,
                 "sigma_pos_m":   effective_sigma_pos,
                 "sigma_vel_mps": sv,
@@ -475,13 +562,13 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
     
     static_vis_prob = radar.get("static_visible_prob", 0.1)
     
-    for cx, cy, ctype in global_static_clutter:
-        if not in_fov(radar, cx, cy):
+    for cx, cy, cz, ctype in global_static_clutter:
+        if not in_fov(radar, cx, cy, cz):
             continue
         
         # Her tarama döngüsünde bu ortak clutter noktasını tarasın
         t = np.random.uniform(0, radar["revisit_mean_s"])
-        track_id_suffix = abs(hash((cx, cy, radar["name"]))) % 90000
+        track_id_suffix = abs(hash((cx, cy, cz, radar["name"]))) % 90000
         
         while t <= t_max:
             t += max(0.1, np.random.normal(radar["revisit_mean_s"], radar["revisit_jitter"]))
@@ -499,20 +586,25 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
             # Polar koordinatlardan ölçüm simülasyonu (fiziksel model korunur)
             dx_true = cx - radar["pos_x"]
             dy_true = cy - radar["pos_y"]
-            r_true = math.hypot(dx_true, dy_true)
+            dz_true = cz - radar.get("pos_z", 0.0)
+            r_true = math.sqrt(dx_true * dx_true + dy_true * dy_true + dz_true * dz_true)
             theta_true = math.atan2(dy_true, dx_true)
+            phi_true = math.atan2(dz_true, max(math.hypot(dx_true, dy_true), 1e-6))
             
             r_meas = r_true + np.random.normal(0, sp)
             theta_meas = theta_true + np.random.normal(0, SIGMA_AZ_RAD)
+            phi_meas = phi_true + np.random.normal(0, SIGMA_EL_RAD)
             
-            x_meas = radar["pos_x"] + current_bias_x + r_meas * math.cos(theta_meas)
-            y_meas = radar["pos_y"] + current_bias_y + r_meas * math.sin(theta_meas)
+            x_meas = radar["pos_x"] + current_bias_x + r_meas * math.cos(phi_meas) * math.cos(theta_meas)
+            y_meas = radar["pos_y"] + current_bias_y + r_meas * math.cos(phi_meas) * math.sin(theta_meas)
+            z_meas = radar.get("pos_z", 0.0) + current_bias_z + r_meas * math.sin(phi_meas)
             
             # Statik obje hızı sıfıra yakın (+ gürültü)
             vx_meas = np.random.normal(0, sv * 2.0)
             vy_meas = np.random.normal(0, sv * 2.0)
+            vz_meas = np.random.normal(0, sv * 2.0)
             
-            effective_sigma_pos = math.sqrt(sp**2 + (r_true * SIGMA_AZ_RAD)**2)
+            effective_sigma_pos = math.sqrt(sp**2 + (r_true * SIGMA_AZ_RAD) ** 2 + (r_true * SIGMA_EL_RAD) ** 2)
             
             records.append({
                 "time":           round(t + radar["delay_s"], 2),
@@ -521,8 +613,10 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
                 "callsign_true":  f"STATIC_CLUTTER_{ctype}",
                 "x":  x_meas,
                 "y":  y_meas,
+                "z":  z_meas,
                 "vx": vx_meas,
                 "vy": vy_meas,
+                "vz": vz_meas,
                 "track_quality": tq,
                 "sigma_pos_m":   effective_sigma_pos,
                 "sigma_vel_mps": sv,
@@ -533,7 +627,7 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
     # 3. GLOBAL HAYALET ROTALAR (Kuş sürüleri, hava olayları) - ZAMANLA SINIRLI
     # =========================================================================
     
-    for t_start, t_end, x_traj, y_traj, vx_ghost, vy_ghost in ghost_tracks:
+    for t_start, t_end, x_traj, y_traj, z_traj, vx_ghost, vy_ghost, vz_ghost in ghost_tracks:
         local_track_id = f"{radar['name']}-GH{np.random.randint(10000, 99999)}"
         
         # Hayalet rotanın zamansal aralığında taraşlarını başlat
@@ -548,9 +642,10 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
             # Hayalet rotanın o anki konumu (lineer hareket)
             x_ghost = x_traj(t)
             y_ghost = y_traj(t)
+            z_ghost = z_traj(t)
             
             # FOV dışındaysa gözlemlenemiyor
-            if not in_fov(radar, x_ghost, y_ghost):
+            if not in_fov(radar, x_ghost, y_ghost, z_ghost):
                 dropped = True
                 continue
             
@@ -565,27 +660,59 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
             # Polar koordinatlardan ölçüm simülasyonu
             dx_true = x_ghost - radar["pos_x"]
             dy_true = y_ghost - radar["pos_y"]
-            r_true = math.hypot(dx_true, dy_true)
+            dz_true = z_ghost - radar.get("pos_z", 0.0)
+            r_true = math.sqrt(dx_true * dx_true + dy_true * dy_true + dz_true * dz_true)
             theta_true = math.atan2(dy_true, dx_true)
+            phi_true = math.atan2(dz_true, max(math.hypot(dx_true, dy_true), 1e-6))
             
             r_meas = r_true + np.random.normal(0, sp)
             theta_meas = theta_true + np.random.normal(0, SIGMA_AZ_RAD)
+            phi_meas = phi_true + np.random.normal(0, SIGMA_EL_RAD)
             
-            x_meas = radar["pos_x"] + current_bias_x + r_meas * math.cos(theta_meas)
-            y_meas = radar["pos_y"] + current_bias_y + r_meas * math.sin(theta_meas)
+            x_meas = radar["pos_x"] + current_bias_x + r_meas * math.cos(phi_meas) * math.cos(theta_meas)
+            y_meas = radar["pos_y"] + current_bias_y + r_meas * math.cos(phi_meas) * math.sin(theta_meas)
+            z_meas = radar.get("pos_z", 0.0) + current_bias_z + r_meas * math.sin(phi_meas)
             
             # Hayalet rotanın hızı (Doppler modeli ile)
-            v_rad_true = vx_ghost * math.cos(theta_true) + vy_ghost * math.sin(theta_true)
-            v_cross_true = -vx_ghost * math.sin(theta_true) + vy_ghost * math.cos(theta_true)
+            ur_true = np.array([
+                math.cos(phi_true) * math.cos(theta_true),
+                math.cos(phi_true) * math.sin(theta_true),
+                math.sin(phi_true),
+            ])
+            uth_true = np.array([-math.sin(theta_true), math.cos(theta_true), 0.0])
+            uph_true = np.array([
+                -math.sin(phi_true) * math.cos(theta_true),
+                -math.sin(phi_true) * math.sin(theta_true),
+                math.cos(phi_true),
+            ])
+            v_true = np.array([vx_ghost, vy_ghost, vz_ghost])
+            v_rad_true = float(v_true @ ur_true)
+            v_cross_true = float(v_true @ uth_true)
+            v_vert_true = float(v_true @ uph_true)
             
             # Hayalet ölçümler daha gürültülü
             v_rad_meas = v_rad_true + np.random.normal(0, sv * 1.5)
             v_cross_meas = v_cross_true + np.random.normal(0, sv * 4.0)
+            v_vert_meas = v_vert_true + np.random.normal(0, sv * 2.0)
+
+            ur_meas = np.array([
+                math.cos(phi_meas) * math.cos(theta_meas),
+                math.cos(phi_meas) * math.sin(theta_meas),
+                math.sin(phi_meas),
+            ])
+            uth_meas = np.array([-math.sin(theta_meas), math.cos(theta_meas), 0.0])
+            uph_meas = np.array([
+                -math.sin(phi_meas) * math.cos(theta_meas),
+                -math.sin(phi_meas) * math.sin(theta_meas),
+                math.cos(phi_meas),
+            ])
+            v_meas = v_rad_meas * ur_meas + v_cross_meas * uth_meas + v_vert_meas * uph_meas
             
-            vx_meas = v_rad_meas * math.cos(theta_meas) - v_cross_meas * math.sin(theta_meas)
-            vy_meas = v_rad_meas * math.sin(theta_meas) + v_cross_meas * math.cos(theta_meas)
+            vx_meas = float(v_meas[0])
+            vy_meas = float(v_meas[1])
+            vz_meas = float(v_meas[2])
             
-            effective_sigma_pos = math.sqrt(sp**2 + (r_true * SIGMA_AZ_RAD)**2)
+            effective_sigma_pos = math.sqrt(sp**2 + (r_true * SIGMA_AZ_RAD) ** 2 + (r_true * SIGMA_EL_RAD) ** 2)
             
             records.append({
                 "time":           round(t + radar["delay_s"], 2),
@@ -594,8 +721,10 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
                 "callsign_true":  "GHOST_TRACK",
                 "x":  x_meas,
                 "y":  y_meas,
+                "z":  z_meas,
                 "vx": vx_meas,
                 "vy": vy_meas,
+                "vz": vz_meas,
                 "track_quality": tq,
                 "sigma_pos_m":   effective_sigma_pos,
                 "sigma_vel_mps": sv,
@@ -607,7 +736,7 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
     # =========================================================================
     # Global kaynaklarından sonra, geriye kalan çok az miktarında random clutter
     
-    xmin, xmax, ymin, ymax = radar["clutter_box"]
+    xmin, xmax, ymin, ymax, zmin, zmax = radar["clutter_box"]
     minimal_clutter_rate = radar.get("clutter_rate", 0.0005) * 0.3  # Öncekinin 30%'i
     
     t = np.random.uniform(0, radar["revisit_mean_s"])
@@ -617,8 +746,12 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
             break
         
         for _ in range(np.random.poisson(minimal_clutter_rate)):
-            cx, cy = np.random.uniform(xmin, xmax), np.random.uniform(ymin, ymax)
-            if not in_fov(radar, cx, cy):
+            cx, cy, cz = (
+                np.random.uniform(xmin, xmax),
+                np.random.uniform(ymin, ymax),
+                np.random.uniform(zmin, zmax),
+            )
+            if not in_fov(radar, cx, cy, cz):
                 continue
             tq = int(np.clip(np.random.randint(1, 3), TQ_MIN, TQ_MAX))
             sp, sv = tq_to_sigma_pos(tq), tq_to_sigma_vel(tq)
@@ -628,9 +761,10 @@ def simulate_radar_gercekci(radar, gt_df, global_static_clutter=None, ghost_trac
                 "sensor":         radar["name"],
                 "local_track_id": f"{radar['name']}-DC{np.random.randint(10000, 99999)}",
                 "callsign_true":  "DYNAMIC_CLUTTER",
-                "x": cx, "y": cy,
+                "x": cx, "y": cy, "z": cz,
                 "vx": np.random.normal(0, sv * 0.2),
                 "vy": np.random.normal(0, sv * 0.2),
+                "vz": np.random.normal(0, sv * 0.2),
                 "track_quality": tq,
                 "sigma_pos_m":   sp,
                 "sigma_vel_mps": sv,

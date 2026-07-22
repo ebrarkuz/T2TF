@@ -8,15 +8,19 @@ def interpolate_gt_state(sub, t):
 
     x = np.interp(t, sub["time"], sub["x"])
     y = np.interp(t, sub["time"], sub["y"])
+    z = np.interp(t, sub["time"], sub["z"]) if "z" in sub.columns else 0.0
     vx = np.interp(t, sub["time"], sub["vx"])
     vy = np.interp(t, sub["time"], sub["vy"])
+    vz = np.interp(t, sub["time"], sub["vz"]) if "vz" in sub.columns else 0.0
 
     return {
         "track_id": sub["callsign"].iloc[0] if "callsign" in sub.columns else sub["target"].iloc[0],
         "x": x,
         "y": y,
+        "z": z,
         "vx": vx,
         "vy": vy,
+        "vz": vz,
     }
 
 
@@ -24,8 +28,12 @@ def frame_matches(fused_frame, gt_states, max_distance=00.0):
     if fused_frame.empty or len(gt_states) == 0:
         return [], list(range(len(fused_frame))), list(range(len(gt_states)))
 
-    fused_pos = fused_frame[["x", "y"]].to_numpy()
-    gt_pos = np.array([[s["x"], s["y"]] for s in gt_states])
+    fused_pos = fused_frame[["x", "y", "z"]].to_numpy() if "z" in fused_frame.columns else np.column_stack([
+        fused_frame["x"].to_numpy(),
+        fused_frame["y"].to_numpy(),
+        np.zeros(len(fused_frame)),
+    ])
+    gt_pos = np.array([[s["x"], s["y"], s.get("z", 0.0)] for s in gt_states])
     cost = np.linalg.norm(fused_pos[:, None, :] - gt_pos[None, :, :], axis=2)
 
     row_ind, col_ind = linear_sum_assignment(cost)
@@ -59,7 +67,7 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=200.0):
             "rmse_pos_m": 0.0,
             "rmse_vel_mps": 0.0,
             "nees": 0.0,
-            "nees_ideal": 4.0,
+            "nees_ideal": 6.0,
         }
 
     gt_key = "callsign" if "callsign" in gt_df.columns else "target"
@@ -133,20 +141,24 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=200.0):
         for fused_row, gt_state in matched_rows:
             dx = fused_row["x"] - gt_state["x"]
             dy = fused_row["y"] - gt_state["y"]
+            dz = fused_row.get("z", 0.0) - gt_state.get("z", 0.0)
             dvx = fused_row["vx"] - gt_state["vx"]
             dvy = fused_row["vy"] - gt_state["vy"]
-            errors_pos.append(dx**2 + dy**2)
-            errors_vel.append(dvx**2 + dvy**2)
+            dvz = fused_row.get("vz", 0.0) - gt_state.get("vz", 0.0)
+            errors_pos.append(dx**2 + dy**2 + dz**2)
+            errors_vel.append(dvx**2 + dvy**2 + dvz**2)
 
             cov = np.diag([
                 fused_row.get("sigma_x_m", fused_row.get("pos_sigma_m", 1.0)) ** 2,
                 fused_row.get("sigma_vx_mps", fused_row.get("vel_sigma_mps", 1.0)) ** 2,
                 fused_row.get("sigma_y_m", fused_row.get("pos_sigma_m", 1.0)) ** 2,
                 fused_row.get("sigma_vy_mps", fused_row.get("vel_sigma_mps", 1.0)) ** 2,
+                fused_row.get("sigma_z_m", fused_row.get("pos_sigma_m", 1.0)) ** 2,
+                fused_row.get("sigma_vz_mps", fused_row.get("vel_sigma_mps", 1.0)) ** 2,
             ])
             try:
                 invP = np.linalg.inv(cov)
-                e = np.array([dx, dvx, dy, dvy])
+                e = np.array([dx, dvx, dy, dvy, dz, dvz])
                 nees_vals.append(float(e.T @ invP @ e))
             except np.linalg.LinAlgError:
                 pass
@@ -171,7 +183,7 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=200.0):
         "rmse_pos_m": rmse_pos,
         "rmse_vel_mps": rmse_vel,
         "nees": nees_mean,
-        "nees_ideal": 4.0,
+        "nees_ideal": 6.0,
     }
 
 
@@ -236,7 +248,8 @@ def compute_target_specific_metrics(gt_df, fused_df, target_callsign, max_match_
         # Aksi hâlde başka hedeflerin/clutter'ların track'leri FP olarak sayılır.
         dist_arr = np.sqrt(
             (fused_frame["x"].to_numpy() - gt_state["x"]) ** 2 +
-            (fused_frame["y"].to_numpy() - gt_state["y"]) ** 2
+            (fused_frame["y"].to_numpy() - gt_state["y"]) ** 2 +
+            ((fused_frame["z"].to_numpy() if "z" in fused_frame.columns else np.zeros(len(fused_frame))) - gt_state.get("z", 0.0)) ** 2
         )
         fused_candidates = fused_frame[dist_arr <= max_match_distance].reset_index(drop=True)
 
@@ -279,20 +292,24 @@ def compute_target_specific_metrics(gt_df, fused_df, target_callsign, max_match_
         for fused_row, gt_state in matched_rows:
             dx = fused_row["x"] - gt_state["x"]
             dy = fused_row["y"] - gt_state["y"]
+            dz = fused_row.get("z", 0.0) - gt_state.get("z", 0.0)
             dvx = fused_row["vx"] - gt_state["vx"]
             dvy = fused_row["vy"] - gt_state["vy"]
-            errors_pos.append(dx**2 + dy**2)
-            errors_vel.append(dvx**2 + dvy**2)
+            dvz = fused_row.get("vz", 0.0) - gt_state.get("vz", 0.0)
+            errors_pos.append(dx**2 + dy**2 + dz**2)
+            errors_vel.append(dvx**2 + dvy**2 + dvz**2)
             
             cov = np.diag([
                 fused_row.get("sigma_x_m", fused_row.get("pos_sigma_m", 1.0)) ** 2,
                 fused_row.get("sigma_vx_mps", fused_row.get("vel_sigma_mps", 1.0)) ** 2,
                 fused_row.get("sigma_y_m", fused_row.get("pos_sigma_m", 1.0)) ** 2,
                 fused_row.get("sigma_vy_mps", fused_row.get("vel_sigma_mps", 1.0)) ** 2,
+                fused_row.get("sigma_z_m", fused_row.get("pos_sigma_m", 1.0)) ** 2,
+                fused_row.get("sigma_vz_mps", fused_row.get("vel_sigma_mps", 1.0)) ** 2,
             ])
             try:
                 invP = np.linalg.inv(cov)
-                e = np.array([dx, dvx, dy, dvy])
+                e = np.array([dx, dvx, dy, dvy, dz, dvz])
                 nees_vals.append(float(e.T @ invP @ e))
             except np.linalg.LinAlgError:
                 pass

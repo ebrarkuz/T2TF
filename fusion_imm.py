@@ -32,7 +32,7 @@ CV_ACCEL_LEAK_Q = 1e-4
 CA_LOW_PROCESS_NOISE_INTENSITY = 0.8
 CA_HIGH_PROCESS_NOISE_INTENSITY = 15.0
 
-GATE_CHI2_4DOF = 25.0 
+GATE_CHI2_6DOF = 25.0
 COAST_TIME_LIMIT = 30.0
 CONFIRM_HITS = 3
 DUPLICATE_DIST_M = 400.0
@@ -70,7 +70,7 @@ def tq_to_sigma_vel(tq) -> float:
 
 def tq_to_cov(tq) -> np.ndarray:
     sp, sv = tq_to_sigma_pos(tq), tq_to_sigma_vel(tq)
-    return np.diag([sp**2, sv**2, sp**2, sv**2])
+    return np.diag([sp**2, sv**2, sp**2, sv**2, sp**2, sv**2])
 
 def sigma_pos_to_tq(sigma_pos: float) -> int:
     sigma_pos = float(np.clip(sigma_pos, SIGMA_POS_MIN, SIGMA_POS_MAX))
@@ -82,26 +82,31 @@ def measurement_cov_from_row(row) -> np.ndarray:
     if "sigma_pos_m" in row and "sigma_vel_mps" in row:
         sp = float(row["sigma_pos_m"])
         sv = float(row["sigma_vel_mps"])
-        return np.diag([sp**2, sv**2, sp**2, sv**2])
+        return np.diag([sp**2, sv**2, sp**2, sv**2, sp**2, sv**2])
     return tq_to_cov(row["track_quality"])
 
-def _pad_4d_to_6d(state_4d, cov_4d):
-    state_6d = np.zeros((6, 1))
-    state_6d[0, 0] = state_4d[0, 0]  # x
-    state_6d[1, 0] = state_4d[1, 0]  # vx
-    state_6d[3, 0] = state_4d[2, 0]  # y
-    state_6d[4, 0] = state_4d[3, 0]  # vy
+def _pad_6d_to_9d(state_6d, cov_6d):
+    state_9d = np.zeros((9, 1))
+    state_9d[0, 0] = state_6d[0, 0]  # x
+    state_9d[1, 0] = state_6d[1, 0]  # vx
+    state_9d[3, 0] = state_6d[2, 0]  # y
+    state_9d[4, 0] = state_6d[3, 0]  # vy
+    state_9d[6, 0] = state_6d[4, 0]  # z
+    state_9d[7, 0] = state_6d[5, 0]  # vz
 
-    cov_6d = np.eye(6) * 1e5
-    cov_6d[0:2, 0:2] = cov_4d[0:2, 0:2]
-    cov_6d[3:5, 3:5] = cov_4d[2:4, 2:4]
-    return state_6d, cov_6d
+    cov_9d = np.eye(9) * 1e5
+    cov_9d[0:2, 0:2] = cov_6d[0:2, 0:2]
+    cov_9d[3:5, 3:5] = cov_6d[2:4, 2:4]
+    cov_9d[6:8, 6:8] = cov_6d[4:6, 4:6]
+    return state_9d, cov_9d
 
 H_MEAS = np.array([
-    [1, 0, 0, 0, 0, 0],
-    [0, 1, 0, 0, 0, 0],
-    [0, 0, 0, 1, 0, 0],
-    [0, 0, 0, 0, 1, 0],
+    [1, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 1, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 1, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 1, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 1, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 1, 0],
 ])
 
 # ===========================================================================
@@ -109,12 +114,15 @@ H_MEAS = np.array([
 # ===========================================================================
 def _F_Q_ca(dt: float, process_noise_intensity: float) -> Tuple[np.ndarray, np.ndarray]:
     F = np.array([
-        [1, dt, 0.5 * dt**2, 0, 0, 0],
-        [0, 1, dt, 0, 0, 0],
-        [0, 0, 1, 0, 0, 0],
-        [0, 0, 0, 1, dt, 0.5 * dt**2],
-        [0, 0, 0, 0, 1, dt],
-        [0, 0, 0, 0, 0, 1],
+        [1, dt, 0.5 * dt**2, 0, 0, 0, 0, 0, 0],
+        [0, 1, dt, 0, 0, 0, 0, 0, 0],
+        [0, 0, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, dt, 0.5 * dt**2, 0, 0, 0],
+        [0, 0, 0, 0, 1, dt, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, dt, 0.5 * dt**2],
+        [0, 0, 0, 0, 0, 0, 0, 1, dt],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1],
     ])
     q = process_noise_intensity ** 2
     dt2, dt3, dt4 = dt**2, dt**3, dt**4
@@ -123,9 +131,10 @@ def _F_Q_ca(dt: float, process_noise_intensity: float) -> Tuple[np.ndarray, np.n
         [dt3 / 2, dt2, dt],
         [dt2 / 2, dt, 1],
     ])
-    Q = np.zeros((6, 6))
+    Q = np.zeros((9, 9))
     Q[np.ix_([0, 1, 2], [0, 1, 2])] = qb
     Q[np.ix_([3, 4, 5], [3, 4, 5])] = qb
+    Q[np.ix_([6, 7, 8], [6, 7, 8])] = qb
     return F, Q
 
 def _F_Q_ca_low(dt: float) -> Tuple[np.ndarray, np.ndarray]:
@@ -136,12 +145,15 @@ def _F_Q_ca_high(dt: float) -> Tuple[np.ndarray, np.ndarray]:
 
 def _F_Q_cv(dt: float) -> Tuple[np.ndarray, np.ndarray]:
     F = np.array([
-        [1, dt, 0, 0, 0, 0],
-        [0, 1, 0, 0, 0, 0],
-        [0, 0, 1, 0, 0, 0],
-        [0, 0, 0, 1, dt, 0],
-        [0, 0, 0, 0, 1, 0],
-        [0, 0, 0, 0, 0, 1],
+        [1, dt, 0, 0, 0, 0, 0, 0, 0],
+        [0, 1, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, dt, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, dt, 0],
+        [0, 0, 0, 0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1],
     ])
     q = CV_PROCESS_NOISE_INTENSITY ** 2
     dt2, dt3 = dt**2, dt**3
@@ -149,11 +161,13 @@ def _F_Q_cv(dt: float) -> Tuple[np.ndarray, np.ndarray]:
         [dt3 / 3, dt2 / 2],
         [dt2 / 2, dt],
     ])
-    Q = np.zeros((6, 6))
+    Q = np.zeros((9, 9))
     Q[np.ix_([0, 1], [0, 1])] = qb_posvel
     Q[2, 2] = CV_ACCEL_LEAK_Q
     Q[np.ix_([3, 4], [3, 4])] = qb_posvel
     Q[5, 5] = CV_ACCEL_LEAK_Q
+    Q[np.ix_([6, 7], [6, 7])] = qb_posvel
+    Q[8, 8] = CV_ACCEL_LEAK_Q
     return F, Q
 
 MODEL_FQ = {"CV": _F_Q_cv, "CA_LOW": _F_Q_ca_low, "CA_HIGH": _F_Q_ca_high}
@@ -206,14 +220,14 @@ def _gaussian_likelihood(diff: np.ndarray, S: np.ndarray) -> float:
 # ===========================================================================
 class GlobalTrackIMM3:
     _cnt = 0
-    def __init__(self, t, state_4d, cov_4d, tq, src, use_ci=True):
+    def __init__(self, t, state_6d, cov_6d, tq, src, use_ci=True):
         GlobalTrackIMM3._cnt += 1
         self.id = f"GT-{GlobalTrackIMM3._cnt:04d}"
         self.time = t
         self.use_ci = use_ci
-        state_6d, cov_6d = _pad_4d_to_6d(state_4d, cov_4d)
-        self.model_state: Dict[str, np.ndarray] = {m: state_6d.copy() for m in MODEL_NAMES}
-        self.model_cov: Dict[str, np.ndarray] = {m: cov_6d.copy() for m in MODEL_NAMES}
+        state_9d, cov_9d = _pad_6d_to_9d(state_6d, cov_6d)
+        self.model_state: Dict[str, np.ndarray] = {m: state_9d.copy() for m in MODEL_NAMES}
+        self.model_cov: Dict[str, np.ndarray] = {m: cov_9d.copy() for m in MODEL_NAMES}
         self.mode_prob: Dict[str, float] = dict(zip(MODEL_NAMES, INIT_MODE_PROB))
         self.state, self.cov = self._combine()
         self.last_update = t
@@ -224,13 +238,13 @@ class GlobalTrackIMM3:
         self.source_measurement_details: set = {f"{src[0] if isinstance(src, tuple) else src}@{t:.2f}"}
         self.hits_count = 1
         self.creation_time = t
-        self.position_history = [(float(self.state[0, 0]), float(self.state[3, 0]), float(t))]
+        self.position_history = [(float(self.state[0, 0]), float(self.state[3, 0]), float(self.state[6, 0]), float(t))]
 
     def _combine(self):
-        x_comb = np.zeros((6, 1))
+        x_comb = np.zeros((9, 1))
         for m in MODEL_NAMES:
             x_comb += self.mode_prob[m] * self.model_state[m]
-        P_comb = np.zeros((6, 6))
+        P_comb = np.zeros((9, 9))
         for m in MODEL_NAMES:
             dx = self.model_state[m] - x_comb
             P_comb += self.mode_prob[m] * (self.model_cov[m] + dx @ dx.T)
@@ -246,10 +260,10 @@ class GlobalTrackIMM3:
         mix_w = (TRANS_PROB * mu[:, None]) / c_bar[None, :] 
         mixed_state, mixed_cov = {}, {}
         for j, mj in enumerate(MODEL_NAMES):
-            x0j = np.zeros((6, 1))
+            x0j = np.zeros((9, 1))
             for i, mi in enumerate(MODEL_NAMES):
                 x0j += mix_w[i, j] * self.model_state[mi]
-            P0j = np.zeros((6, 6))
+            P0j = np.zeros((9, 9))
             for i, mi in enumerate(MODEL_NAMES):
                 dx = self.model_state[mi] - x0j
                 P0j += mix_w[i, j] * (self.model_cov[mi] + dx @ dx.T)
@@ -265,18 +279,18 @@ class GlobalTrackIMM3:
         self.existence_prob *= 0.99
         self._update_status()
 
-    def update(self, meas_state_4d, meas_cov_4d, tq, src):
-        m_state_6d, m_cov_6d = _pad_4d_to_6d(meas_state_4d, meas_cov_4d)
+    def update(self, meas_state_6d, meas_cov_6d, tq, src):
+        m_state_9d, m_cov_9d = _pad_6d_to_9d(meas_state_6d, meas_cov_6d)
         likelihoods = {}
         for m in MODEL_NAMES:
             x_pred, P_pred = self.model_state[m], self.model_cov[m]
-            S = H_MEAS @ P_pred @ H_MEAS.T + meas_cov_4d
-            diff = meas_state_4d - (H_MEAS @ x_pred)
+            S = H_MEAS @ P_pred @ H_MEAS.T + meas_cov_6d
+            diff = meas_state_6d - (H_MEAS @ x_pred)
             likelihoods[m] = _gaussian_likelihood(diff, S)
             if self.use_ci:
-                xf, Pf = _ci_fuse(x_pred, P_pred, m_state_6d, m_cov_6d)
+                xf, Pf = _ci_fuse(x_pred, P_pred, m_state_9d, m_cov_9d)
             else:
-                xf, Pf = _standard_fuse(x_pred, P_pred, m_state_6d, m_cov_6d)
+                xf, Pf = _standard_fuse(x_pred, P_pred, m_state_9d, m_cov_9d)
             self.model_state[m], self.model_cov[m] = xf, Pf
         c_bar = np.array([self.mode_prob[m] for m in MODEL_NAMES])
         raw = c_bar * np.array([likelihoods[m] for m in MODEL_NAMES])
@@ -297,7 +311,7 @@ class GlobalTrackIMM3:
         self.source_radar_names.add(src[0] if isinstance(src, tuple) else src)
         self.source_measurement_details.add(f"{src[0] if isinstance(src, tuple) else src}@{self.time:.2f}")
         self.hits_count += 1
-        self.position_history.append((float(self.state[0, 0]), float(self.state[3, 0]), float(self.time)))
+        self.position_history.append((float(self.state[0, 0]), float(self.state[3, 0]), float(self.state[6, 0]), float(self.time)))
         self._update_status()
 
     def _update_status(self):
@@ -326,13 +340,16 @@ class FusionCenterIMM3:
 
     def _tracks_are_duplicate(self, t1, t2, chi2_thresh=36.0):
         # 1. GERÇEK FİZİKSEL MESAFE (Öklid)
-        dist = math.hypot(float(t1.state[0, 0]) - float(t2.state[0, 0]), 
-                          float(t1.state[3, 0]) - float(t2.state[3, 0]))
+        dx = float(t1.state[0, 0]) - float(t2.state[0, 0])
+        dy = float(t1.state[3, 0]) - float(t2.state[3, 0])
+        dz = float(t1.state[6, 0]) - float(t2.state[6, 0])
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
         
         # 2. HIZ FARKI
         dvx = float(t1.state[1, 0]) - float(t2.state[1, 0])
         dvy = float(t1.state[4, 0]) - float(t2.state[4, 0])
-        vel_diff = math.hypot(dvx, dvy)
+        dvz = float(t1.state[7, 0]) - float(t2.state[7, 0])
+        vel_diff = math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz)
 
         # ZORUNLU BİRLEŞTİRME: Eğer izler birbirine DUPLICATE_DIST_M'den yakınsa 
         # ve hızları tolere edilebilir seviyedeyse, kovaryansa hiç bakma, KESİN BİRLEŞTİR!
@@ -340,9 +357,12 @@ class FusionCenterIMM3:
             return True
 
         # Eğer fiziksel mesafeden geçemedilerse (sınırdalarsa), Mahalanobis'e son bir şans ver
-        dx = np.array([[float(t1.state[0, 0]) - float(t2.state[0, 0])],
-                       [float(t1.state[3, 0]) - float(t2.state[3, 0])]])
-        P_sum = t1.cov[np.ix_([0, 3], [0, 3])] + t2.cov[np.ix_([0, 3], [0, 3])]
+        dx = np.array([
+            [float(t1.state[0, 0]) - float(t2.state[0, 0])],
+            [float(t1.state[3, 0]) - float(t2.state[3, 0])],
+            [float(t1.state[6, 0]) - float(t2.state[6, 0])],
+        ])
+        P_sum = t1.cov[np.ix_([0, 3, 6], [0, 3, 6])] + t2.cov[np.ix_([0, 3, 6], [0, 3, 6])]
         try:
             d2 = float((dx.T @ np.linalg.inv(P_sum) @ dx).item())
             return d2 < chi2_thresh and vel_diff <= DUPLICATE_VEL_MPS
@@ -423,7 +443,7 @@ class FusionCenterIMM3:
             S = H_MEAS @ gt.cov @ H_MEAS.T + m["cov"]
             diff = H_MEAS @ gt.state - m["state"]
             try:
-                gate = GATE_CHI2_4DOF * (2.0 if gt.dominant_model() == "CA_HIGH" else 1.0)
+                gate = GATE_CHI2_6DOF * (2.0 if gt.dominant_model() == "CA_HIGH" else 1.0)
                 if float((diff.T @ np.linalg.inv(S) @ diff).item()) < gate:
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
                     self.src_map[m["src"]] = gt.id
@@ -447,7 +467,7 @@ class FusionCenterIMM3:
                         Si = np.linalg.inv(S)
                         _, ld = np.linalg.slogdet(S)
                         d2 = float((diff.T @ Si @ diff).item())
-                        gate = GATE_CHI2_4DOF * (2.0 if gt.dominant_model() == "CA_HIGH" else 1.0)
+                        gate = GATE_CHI2_6DOF * (2.0 if gt.dominant_model() == "CA_HIGH" else 1.0)
                         if d2 < gate:
                             cost[ri, ci] = d2 + max(0, ld)
                     except np.linalg.LinAlgError:
@@ -480,14 +500,20 @@ class FusionCenterIMM3:
                 # Sabit hız varsayımıyla hedefin mevcut boşlukta ne kadar ilerlediğini tahmin et
                 pred_x = float(old_gt.state[0, 0]) + float(old_gt.state[1, 0]) * dt_gap
                 pred_y = float(old_gt.state[3, 0]) + float(old_gt.state[4, 0]) * dt_gap
+                pred_z = float(old_gt.state[6, 0]) + float(old_gt.state[7, 0]) * dt_gap
                 
                 meas_x = float(m["state"][0, 0])
                 meas_y = float(m["state"][2, 0])
-                dist = math.hypot(pred_x - meas_x, pred_y - meas_y)
+                meas_z = float(m["state"][4, 0])
+                ddx = pred_x - meas_x
+                ddy = pred_y - meas_y
+                ddz = pred_z - meas_z
+                dist = math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz)
                 
                 dvx = float(old_gt.state[1, 0]) - float(m["state"][1, 0])
                 dvy = float(old_gt.state[4, 0]) - float(m["state"][3, 0])
-                vel_diff = math.hypot(dvx, dvy)
+                dvz = float(old_gt.state[7, 0]) - float(m["state"][5, 0])
+                vel_diff = math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz)
                 
                 # Biraz esnek tolerans (Hedef kopuk sürede manevra yapmış olabilir: ~300m, 45m/s tolerans)
                 if dist < (DUPLICATE_DIST_M * 2.0) and vel_diff <= (DUPLICATE_VEL_MPS * 1.5):
@@ -547,7 +573,14 @@ def run_imm3_fusion(
     for t_val, group in sensor_df.groupby("time", sort=True):
         measurements = []
         for _, row in group.iterrows():
-            state = np.array([row["x"], row["vx"], row["y"], row["vy"]]).reshape(4, 1)
+            state = np.array([
+                row["x"],
+                row["vx"],
+                row["y"],
+                row["vy"],
+                row.get("z", 0.0),
+                row.get("vz", 0.0),
+            ]).reshape(6, 1)
             cov = measurement_cov_from_row(row)
             tq = row.get("track_quality", TQ_MAX)
             measurements.append({
@@ -566,6 +599,8 @@ def run_imm3_fusion(
             sigma_vx = math.sqrt(max(float(gt.cov[1, 1]), 1e-6))
             sigma_y = math.sqrt(max(float(gt.cov[3, 3]), 1e-6))
             sigma_vy = math.sqrt(max(float(gt.cov[4, 4]), 1e-6))
+            sigma_z = math.sqrt(max(float(gt.cov[6, 6]), 1e-6))
+            sigma_vz = math.sqrt(max(float(gt.cov[7, 7]), 1e-6))
             source_names = ", ".join(sorted(gt.source_radar_names))
 
             rec = {
@@ -573,16 +608,21 @@ def run_imm3_fusion(
                 "global_track_id": gt.id,
                 "x": float(gt.state[0, 0]),
                 "y": float(gt.state[3, 0]),
+                "z": float(gt.state[6, 0]),
                 "vx": float(gt.state[1, 0]),
                 "vy": float(gt.state[4, 0]),
+                "vz": float(gt.state[7, 0]),
                 "ax": float(gt.state[2, 0]),
                 "ay": float(gt.state[5, 0]),
+                "az": float(gt.state[8, 0]),
                 "pos_sigma_m": sigma_x,
                 "vel_sigma_mps": sigma_vx,
                 "sigma_x_m": sigma_x,
                 "sigma_vx_mps": sigma_vx,
                 "sigma_y_m": sigma_y,
                 "sigma_vy_mps": sigma_vy,
+                "sigma_z_m": sigma_z,
+                "sigma_vz_mps": sigma_vz,
                 "fused_tq": sigma_pos_to_tq(sigma_x),
                 "prob": round(gt.existence_prob, 3),
                 "mode_prob_cv": round(gt.mode_prob["CV"], 3),

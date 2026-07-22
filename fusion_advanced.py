@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore")
 # KONFIGURASYON & SABITLER
 # ===========================================================================
 PROCESS_NOISE_INTENSITY = 1.5  # CA modelinde "Jerk (İvme değişimi)" varyansını temsil eder
-GATE_CHI2_4DOF = 18.47   
+GATE_CHI2_6DOF = 22.5
 COAST_TIME_LIMIT = 30.0
 CONFIRM_HITS = 2               # minimum number of updates before a track can be CONFIRMED
 DUPLICATE_DIST_M = 150.0       # IMM kodundaki gibi genişletildi
@@ -47,7 +47,7 @@ def tq_to_sigma_vel(tq) -> float:
 
 def tq_to_cov(tq) -> np.ndarray:
     sp, sv = tq_to_sigma_pos(tq), tq_to_sigma_vel(tq)
-    return np.diag([sp**2, sv**2, sp**2, sv**2])
+    return np.diag([sp**2, sv**2, sp**2, sv**2, sp**2, sv**2])
 
 def sigma_pos_to_tq(sigma_pos: float) -> int:
     sigma_pos = float(np.clip(sigma_pos, SIGMA_POS_MIN, SIGMA_POS_MAX))
@@ -59,22 +59,25 @@ def measurement_cov_from_row(row) -> np.ndarray:
     if "sigma_pos_m" in row and "sigma_vel_mps" in row:
         sp = float(row["sigma_pos_m"])
         sv = float(row["sigma_vel_mps"])
-        return np.diag([sp**2, sv**2, sp**2, sv**2])
+        return np.diag([sp**2, sv**2, sp**2, sv**2, sp**2, sv**2])
     return tq_to_cov(row["track_quality"])
 
-def _pad_4d_to_6d(state_4d, cov_4d):
-    """4D ölçümünü 6D (Sabit İvme) durumuna genişletir. İvme varyansı devasa bırakılır."""
-    state_6d = np.zeros((6, 1))
-    state_6d[0, 0] = state_4d[0, 0]  # x
-    state_6d[1, 0] = state_4d[1, 0]  # vx
-    state_6d[3, 0] = state_4d[2, 0]  # y
-    state_6d[4, 0] = state_4d[3, 0]  # vy
+def _pad_6d_to_9d(state_6d, cov_6d):
+    """6D ölçümü 9D (3B sabit ivme) duruma genişletir. İvme varyansı devasa bırakılır."""
+    state_9d = np.zeros((9, 1))
+    state_9d[0, 0] = state_6d[0, 0]  # x
+    state_9d[1, 0] = state_6d[1, 0]  # vx
+    state_9d[3, 0] = state_6d[2, 0]  # y
+    state_9d[4, 0] = state_6d[3, 0]  # vy
+    state_9d[6, 0] = state_6d[4, 0]  # z
+    state_9d[7, 0] = state_6d[5, 0]  # vz
 
-    cov_6d = np.eye(6) * 1e5  # İvme için kasıtlı devasa belirsizlik
-    cov_6d[0:2, 0:2] = cov_4d[0:2, 0:2]
-    cov_6d[3:5, 3:5] = cov_4d[2:4, 2:4]
+    cov_9d = np.eye(9) * 1e5
+    cov_9d[0:2, 0:2] = cov_6d[0:2, 0:2]
+    cov_9d[3:5, 3:5] = cov_6d[2:4, 2:4]
+    cov_9d[6:8, 6:8] = cov_6d[4:6, 4:6]
 
-    return state_6d, cov_6d
+    return state_9d, cov_9d
 
 # ===========================================================================
 # FUZYON ALGORITMASI SINIFLARI
@@ -114,10 +117,10 @@ class GlobalTrack:
         self.id = f"GT-{GlobalTrack._cnt:04d}"
         self.time = t
         
-        # 4D veriyi 6D CA modeline genişlet
-        state_6d, cov_6d = _pad_4d_to_6d(state.reshape(4, 1), cov)
-        self.state = state_6d
-        self.cov = cov_6d
+        # 6D veriyi 9D CA modeline genişlet
+        state_9d, cov_9d = _pad_6d_to_9d(state.reshape(6, 1), cov)
+        self.state = state_9d
+        self.cov = cov_9d
         
         self.last_update = t
         self.existence_prob = 0.1 + 0.7 * ((tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
@@ -128,24 +131,27 @@ class GlobalTrack:
         
         self.hits_count = 1
         self.creation_time = t
-        self.position_history = [(float(self.state[0,0]), float(self.state[3,0]), float(t))]
+        self.position_history = [(float(self.state[0,0]), float(self.state[3,0]), float(self.state[6,0]), float(t))]
         self.use_ci = use_ci
 
     def propagate(self, t):
         dt = t - self.time
         if dt <= 0: return
         
-        # 6D Sabit İvme Durum Geçiş Matrisi
+        # 9D (x,y,z eksenlerinde CA) durum geçiş matrisi
         F = np.array([
-            [1, dt, 0.5 * dt**2, 0,  0,          0],
-            [0,  1,          dt, 0,  0,          0],
-            [0,  0,           1, 0,  0,          0],
-            [0,  0,           0, 1, dt, 0.5 * dt**2],
-            [0,  0,           0, 0,  1,         dt],
-            [0,  0,           0, 0,  0,          1]
+            [1, dt, 0.5 * dt**2, 0,  0,          0, 0,  0,          0],
+            [0,  1,          dt, 0,  0,          0, 0,  0,          0],
+            [0,  0,           1, 0,  0,          0, 0,  0,          0],
+            [0,  0,           0, 1, dt, 0.5 * dt**2, 0,  0,          0],
+            [0,  0,           0, 0,  1,         dt, 0,  0,          0],
+            [0,  0,           0, 0,  0,          1, 0,  0,          0],
+            [0,  0,           0, 0,  0,          0, 1, dt, 0.5 * dt**2],
+            [0,  0,           0, 0,  0,          0, 0,  1,         dt],
+            [0,  0,           0, 0,  0,          0, 0,  0,          1],
         ])
         
-        # 6D Süreç Gürültüsü Matrisi
+        # 9D Süreç Gürültüsü Matrisi
         q = PROCESS_NOISE_INTENSITY ** 2
         dt2 = dt**2; dt3 = dt**3; dt4 = dt**4
         qb = q * np.array([
@@ -154,9 +160,10 @@ class GlobalTrack:
             [dt2/2, dt,    1]
         ])
         
-        Q = np.zeros((6, 6))
+        Q = np.zeros((9, 9))
         Q[np.ix_([0,1,2],[0,1,2])] = qb
         Q[np.ix_([3,4,5],[3,4,5])] = qb
+        Q[np.ix_([6,7,8],[6,7,8])] = qb
         
         self.state = F @ self.state
         self.cov = 0.5 * ((F @ self.cov @ F.T + Q) + (F @ self.cov @ F.T + Q).T)
@@ -165,12 +172,12 @@ class GlobalTrack:
         self._update_status()
 
     def update(self, meas_state, meas_cov, tq, src):
-        m_state_6d, m_cov_6d = _pad_4d_to_6d(meas_state, meas_cov)
+        m_state_9d, m_cov_9d = _pad_6d_to_9d(meas_state, meas_cov)
         
         if self.use_ci:
-            xf, Pf = _ci_fuse(self.state, self.cov, m_state_6d, m_cov_6d)
+            xf, Pf = _ci_fuse(self.state, self.cov, m_state_9d, m_cov_9d)
         else:
-            xf, Pf = _standard_fuse(self.state, self.cov, m_state_6d, m_cov_6d)
+            xf, Pf = _standard_fuse(self.state, self.cov, m_state_9d, m_cov_9d)
             
         self.state, self.cov = xf, Pf
         self.last_update = self.time
@@ -181,7 +188,7 @@ class GlobalTrack:
         self.source_measurement_details.add(f"{src[0] if isinstance(src, tuple) else src}@{self.time:.2f}")
         
         self.hits_count += 1
-        self.position_history.append((float(self.state[0,0]), float(self.state[3,0]), float(self.time)))
+        self.position_history.append((float(self.state[0,0]), float(self.state[3,0]), float(self.state[6,0]), float(self.time)))
         self._update_status()
 
     def _update_status(self):
@@ -203,22 +210,26 @@ class FusionCenter:
         İki track'in konumlarını Mahalanobis, hızlarını Öklid ile kıyaslar.
         chi2_thresh=16.0 yaklaşık %99+ güven aralığına denk gelir (2 serbestlik derecesi için).
         """
-        # 1. Konum için Mahalanobis Mesafesi (0: x, 3: y)
-        dx = np.array([[float(t1.state[0,0]) - float(t2.state[0,0])],
-                       [float(t1.state[3,0]) - float(t2.state[3,0])]])
+        # 1. Konum için Mahalanobis Mesafesi (0: x, 3: y, 6: z)
+        dx = np.array([
+            [float(t1.state[0,0]) - float(t2.state[0,0])],
+            [float(t1.state[3,0]) - float(t2.state[3,0])],
+            [float(t1.state[6,0]) - float(t2.state[6,0])],
+        ])
         
         # Inovasyon Kovaryansı (İki track'in pozisyon belirsizliklerinin toplamı)
-        P_sum = t1.cov[np.ix_([0,3],[0,3])] + t2.cov[np.ix_([0,3],[0,3])]
+        P_sum = t1.cov[np.ix_([0,3,6],[0,3,6])] + t2.cov[np.ix_([0,3,6],[0,3,6])]
         
         try:
             d2 = float((dx.T @ np.linalg.inv(P_sum) @ dx).item())
         except np.linalg.LinAlgError:
             return False
 
-        # 2. Hız için basit Öklid Mesafesi (1: vx, 4: vy)
+        # 2. Hız için basit Öklid Mesafesi (1: vx, 4: vy, 7: vz)
         dvx = float(t1.state[1,0]) - float(t2.state[1,0])
         dvy = float(t1.state[4,0]) - float(t2.state[4,0])
-        vel_diff = math.hypot(dvx, dvy)
+        dvz = float(t1.state[7,0]) - float(t2.state[7,0])
+        vel_diff = math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz)
 
         return d2 < chi2_thresh and vel_diff <= DUPLICATE_VEL_MPS
 
@@ -292,12 +303,14 @@ class FusionCenter:
         gt_by_id = {gt.id: i for i, gt in enumerate(self.tracks)}
         matched_gt, matched_m = set(), set()
         
-        # Gözlem (Observation) Matrisi H: 6D Durumu 4D ölçüme iz düşürür
+        # Gözlem (Observation) Matrisi H: 9D Durumu 6D ölçüme iz düşürür
         H = np.array([
-            [1, 0, 0, 0, 0, 0],  # x
-            [0, 1, 0, 0, 0, 0],  # vx
-            [0, 0, 0, 1, 0, 0],  # y
-            [0, 0, 0, 0, 1, 0]   # vy
+            [1, 0, 0, 0, 0, 0, 0, 0, 0],  # x
+            [0, 1, 0, 0, 0, 0, 0, 0, 0],  # vx
+            [0, 0, 0, 1, 0, 0, 0, 0, 0],  # y
+            [0, 0, 0, 0, 1, 0, 0, 0, 0],  # vy
+            [0, 0, 0, 0, 0, 0, 1, 0, 0],  # z
+            [0, 0, 0, 0, 0, 0, 0, 1, 0],  # vz
         ])
 
         for mi, m in enumerate(measurements):
@@ -312,7 +325,7 @@ class FusionCenter:
             diff = H @ gt.state - m["state"]
             
             try:
-                if float((diff.T @ np.linalg.inv(S) @ diff).item()) < GATE_CHI2_4DOF:
+                if float((diff.T @ np.linalg.inv(S) @ diff).item()) < GATE_CHI2_6DOF:
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
                     self.src_map[m["src"]] = gt.id
                     matched_gt.add(gi); matched_m.add(mi)
@@ -333,7 +346,7 @@ class FusionCenter:
                         Si = np.linalg.inv(S)
                         _, ld = np.linalg.slogdet(S)
                         d2 = float((diff.T @ Si @ diff).item())
-                        if d2 < GATE_CHI2_4DOF:
+                        if d2 < GATE_CHI2_6DOF:
                             cost[ri, ci] = d2 + max(0, ld)
                     except np.linalg.LinAlgError:
                         pass
@@ -380,7 +393,14 @@ def run_advanced_fusion(
     for t_val, group in fusion_input.groupby("time", sort=True):
         measurements = []
         for _, row in group.iterrows():
-            state = np.array([row["x"], row["vx"], row["y"], row["vy"]]).reshape(4, 1)
+            state = np.array([
+                row["x"],
+                row["vx"],
+                row["y"],
+                row["vy"],
+                row.get("z", 0.0),
+                row.get("vz", 0.0),
+            ]).reshape(6, 1)
             cov = measurement_cov_from_row(row)
             tq = row.get("track_quality", TQ_MAX)
             measurements.append({
@@ -398,11 +418,13 @@ def run_advanced_fusion(
                 # buradan silinmiştir. Bu işlem artık FusionCenter içindeki
                 # _merge_duplicates fonksiyonunda çok daha güvenli yapılmaktadır.
 
-                # 6D Endeks Düzeltmeleri Uygulandı (3 ve 4. indeksler)
+                # 9D endeksler: x,vx,ax,y,vy,ay,z,vz,az
                 sigma_x = math.sqrt(max(float(gt.cov[0, 0]), 1e-6))
                 sigma_vx = math.sqrt(max(float(gt.cov[1, 1]), 1e-6))
                 sigma_y = math.sqrt(max(float(gt.cov[3, 3]), 1e-6))
                 sigma_vy = math.sqrt(max(float(gt.cov[4, 4]), 1e-6))
+                sigma_z = math.sqrt(max(float(gt.cov[6, 6]), 1e-6))
+                sigma_vz = math.sqrt(max(float(gt.cov[7, 7]), 1e-6))
                 source_names = ", ".join(sorted(gt.source_radar_names))
                 
                 output_records.append({
@@ -410,14 +432,21 @@ def run_advanced_fusion(
                     "global_track_id": gt.id,
                     "x": float(gt.state[0, 0]),
                     "y": float(gt.state[3, 0]),
+                    "z": float(gt.state[6, 0]),
                     "vx": float(gt.state[1, 0]),
                     "vy": float(gt.state[4, 0]),
+                    "vz": float(gt.state[7, 0]),
+                    "ax": float(gt.state[2, 0]),
+                    "ay": float(gt.state[5, 0]),
+                    "az": float(gt.state[8, 0]),
                     "pos_sigma_m": sigma_x,
                     "vel_sigma_mps": sigma_vx,
                     "sigma_x_m": sigma_x,
                     "sigma_vx_mps": sigma_vx,
                     "sigma_y_m": sigma_y,
                     "sigma_vy_mps": sigma_vy,
+                    "sigma_z_m": sigma_z,
+                    "sigma_vz_mps": sigma_vz,
                     "fused_tq": sigma_pos_to_tq(sigma_x),
                     "prob": round(gt.existence_prob, 3),
                     "n_sources": len(gt.source_radar_names),

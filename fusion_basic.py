@@ -15,12 +15,12 @@ DUPLICATE_DIST_M = 150.0
 DUPLICATE_VEL_MPS = 30.0
 
 def tq_to_cov(tq):
-    """TQ değerini 4x4 ölçüm kovaryans matrisine dönüştürür."""
+    """TQ değerini 6x6 ölçüm kovaryans matrisine dönüştürür."""
     tq = np.clip(tq, TQ_MIN, TQ_MAX)
     frac = (tq - TQ_MIN) / (TQ_MAX - TQ_MIN)
     sp = SIGMA_POS_MAX * (SIGMA_POS_MIN / SIGMA_POS_MAX) ** frac
     sv = SIGMA_VEL_MAX * (SIGMA_VEL_MIN / SIGMA_VEL_MAX) ** frac
-    return np.diag([sp**2, sv**2, sp**2, sv**2])
+    return np.diag([sp**2, sv**2, sp**2, sv**2, sp**2, sv**2])
 
 # ---------------------------------------------------------
 # 2. GLOBAL TRACK SINIFI VE TRACK MANAGEMENT (Rapordaki Adım 6)
@@ -32,7 +32,7 @@ class GlobalTrack:
         GlobalTrack._id_counter += 1
         self.id = f"GT-{GlobalTrack._id_counter:04d}"
         self.time = time
-        self.state = state.reshape(4, 1) # [x, vx, y, vy]^T
+        self.state = state.reshape(6, 1) # [x, vx, y, vy, z, vz]^T
         self.cov = cov
         
         # YENİ: Birleştirme (merging) önceliği için hit sayacı
@@ -51,16 +51,18 @@ class GlobalTrack:
 
         # State Transition Matrix (F)
         F = np.array([
-            [1, dt, 0,  0],
-            [0, 1,  0,  0],
-            [0, 0,  1, dt],
-            [0, 0,  0,  1]
+            [1, dt, 0,  0,  0,  0],
+            [0, 1,  0,  0,  0,  0],
+            [0, 0,  1, dt,  0,  0],
+            [0, 0,  0,  1,  0,  0],
+            [0, 0,  0,  0,  1, dt],
+            [0, 0,  0,  0,  0,  1],
         ])
 
         # Process Noise (Q) - Küçük bir belirsizlik eklenir
         q_pos = (0.5 * 1.0 * dt**2)**2
         q_vel = (1.0 * dt)**2
-        Q = np.diag([q_pos, q_vel, q_pos, q_vel])
+        Q = np.diag([q_pos, q_vel, q_pos, q_vel, q_pos, q_vel])
 
         self.state = F @ self.state
         self.cov = F @ self.cov @ F.T + Q
@@ -90,23 +92,27 @@ class FusionCenter:
     def _tracks_are_duplicate(self, t1, t2, chi2_thresh=16.0):
         """
         İki track'in konumlarını Mahalanobis, hızlarını Öklid ile kıyaslar.
-        Dikkat: 4D durumda pozisyonlar 0 ve 2, hızlar 1 ve 3. indekslerdedir.
+        Dikkat: 6D durumda pozisyonlar 0,2,4; hızlar 1,3,5 indekslerdedir.
         """
-        # 1. Konum için Mahalanobis Mesafesi (0: x, 2: y)
-        dx = np.array([[float(t1.state[0,0]) - float(t2.state[0,0])],
-                       [float(t1.state[2,0]) - float(t2.state[2,0])]])
+        # 1. Konum için Mahalanobis Mesafesi (0: x, 2: y, 4: z)
+        dx = np.array([
+            [float(t1.state[0,0]) - float(t2.state[0,0])],
+            [float(t1.state[2,0]) - float(t2.state[2,0])],
+            [float(t1.state[4,0]) - float(t2.state[4,0])],
+        ])
         
-        P_sum = t1.cov[np.ix_([0,2],[0,2])] + t2.cov[np.ix_([0,2],[0,2])]
+        P_sum = t1.cov[np.ix_([0,2,4],[0,2,4])] + t2.cov[np.ix_([0,2,4],[0,2,4])]
         
         try:
             d2 = float((dx.T @ np.linalg.inv(P_sum) @ dx).item())
         except np.linalg.LinAlgError:
             return False
 
-        # 2. Hız için basit Öklid Mesafesi (1: vx, 3: vy)
+        # 2. Hız için basit Öklid Mesafesi (1: vx, 3: vy, 5: vz)
         dvx = float(t1.state[1,0]) - float(t2.state[1,0])
         dvy = float(t1.state[3,0]) - float(t2.state[3,0])
-        vel_diff = math.hypot(dvx, dvy)
+        dvz = float(t1.state[5,0]) - float(t2.state[5,0])
+        vel_diff = math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz)
 
         return d2 < chi2_thresh and vel_diff <= DUPLICATE_VEL_MPS
 
@@ -274,7 +280,14 @@ def run_basic_fusion(
 
     for idx, row in df.iterrows():
         t = row["time"]
-        local_state = np.array([row["x"], row["vx"], row["y"], row["vy"]]).reshape(4, 1)
+        local_state = np.array([
+            row["x"],
+            row["vx"],
+            row["y"],
+            row["vy"],
+            row.get("z", 0.0),
+            row.get("vz", 0.0),
+        ]).reshape(6, 1)
         local_cov = tq_to_cov(row["track_quality"])
         fusion_center.process_measurement(t, local_state, local_cov, row["track_quality"])
 
@@ -286,8 +299,10 @@ def run_basic_fusion(
                         "global_track_id": gt.id,
                         "x": gt.state[0, 0],
                         "y": gt.state[2, 0],
+                        "z": gt.state[4, 0],
                         "vx": gt.state[1, 0],
                         "vy": gt.state[3, 0],
+                        "vz": gt.state[5, 0],
                         "prob": round(gt.existence_prob, 3)
                     })
 
