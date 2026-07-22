@@ -47,7 +47,13 @@ def step2_run_scenarios():
     run_advanced_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_ADV_NOCI, use_ci=False, verbose=False)
     
     # IMM Füzyonu (Gerçekçi veri üzerinde)
-    run_imm_fusion(sensor_csv=GERCEKCI_SENSOR_CSV, output_csv=RES_REAL_IMM, use_ci=True, verbose=False)
+    run_imm_fusion(
+        sensor_csv=GERCEKCI_SENSOR_CSV,
+        output_csv=RES_REAL_IMM,
+        use_ci=True,
+        verbose=False,
+        include_source_measurement_details=False,
+    )
 
 
 def _safe_read_csv(path):
@@ -70,7 +76,7 @@ def step3_compute_metrics():
         "Gerçekçi + Temel (CV)": _safe_read_csv(RES_REAL_BASIC),
         "Gerçekçi + Gelişmiş (CA+CI)": _safe_read_csv(RES_REAL_ADV),
         "Gerçekçi + Gelişmiş (CA, No-CI)": _safe_read_csv(RES_REAL_ADV_NOCI),
-        "Gerçekçi + IMM (CV+CA+CI)": _safe_read_csv(RES_REAL_IMM),
+        "Gerçekçi + IMM3 (CV+CA_LOW+CA_HIGH+CI)": _safe_read_csv(RES_REAL_IMM),
     }
 
     metrics = {name: compute_tracking_metrics(gt_df, df) for name, df in dfs.items()}
@@ -106,7 +112,7 @@ def step4_compute_target_metrics():
         "Gerçekçi + Temel (CV)": _safe_read_csv(RES_REAL_BASIC),
         "Gerçekçi + Gelişmiş (CA+CI)": _safe_read_csv(RES_REAL_ADV),
         "Gerçekçi + Gelişmiş (CA, No-CI)": _safe_read_csv(RES_REAL_ADV_NOCI),
-        "Gerçekçi + IMM (CV+CA+CI)": _safe_read_csv(RES_REAL_IMM),
+        "Gerçekçi + IMM3 (CV+CA_LOW+CA_HIGH+CI)": _safe_read_csv(RES_REAL_IMM),
     }
 
     # Her hedef için metrikleri hesapla

@@ -40,7 +40,12 @@ def enu_to_latlon(x: float, y: float, ref_lat: float, ref_lon: float) -> tuple[f
     return lat, lon
 
 
-def build_map_data(gt_df: pd.DataFrame, sensor_df: pd.DataFrame, fused_df: pd.DataFrame):
+def build_map_data(
+    gt_df: pd.DataFrame,
+    sensor_df: pd.DataFrame,
+    fused_df: pd.DataFrame,
+    show_measurement_details: bool = False,
+):
     ref_lat = gt_df["lat"].median()
     ref_lon = gt_df["lon"].median()
 
@@ -89,23 +94,26 @@ def build_map_data(gt_df: pd.DataFrame, sensor_df: pd.DataFrame, fused_df: pd.Da
         if source_radars == "nan" or source_radars.strip() == "":
             source_radars = "Unknown"
             
-        source_details = str(row["source_measurement_details"]) if "source_measurement_details" in row else "Unknown"
-        if source_details == "nan" or source_details.strip() == "":
-            source_details = source_radars
-            
-        # DEVASA VERİ YÜKÜNÜ ENGELLEYEN YENİ KOD:
-        # Metin çok uzunsa (örneğin 100 karakteri geçiyorsa) sadece son kısımlarını göster
-        if len(source_details) > 100:
-            # Noktalı virgüllerden bölüp sadece son 3 güncellemeyi alıyoruz
-            meas_list = source_details.split(";")
-            source_details = "... " + ";".join(meas_list[-3:]) if len(meas_list) > 3 else source_details[:100] + "..."
-            
         # Prob (Olasılık) değeri için de güvenli erişim
         prob_val = float(row["prob"]) if "prob" in row else 0.0
 
-        fused_hover.append(
-            f"Fused ID: {row['global_track_id']}<br>Time: {row['time']:.2f}<br>Sources: {source_radars}<br>Measurements: {source_details}<br>Prob: {prob_val:.3f}"
-        )
+        if show_measurement_details:
+            source_details = str(row["source_measurement_details"]) if "source_measurement_details" in row else "Unknown"
+            if source_details == "nan" or source_details.strip() == "":
+                source_details = source_radars
+
+            # Metin çok uzunsa sadece son kısımlarını göster
+            if len(source_details) > 100:
+                meas_list = source_details.split(";")
+                source_details = "... " + ";".join(meas_list[-3:]) if len(meas_list) > 3 else source_details[:100] + "..."
+
+            fused_hover.append(
+                f"Fused ID: {row['global_track_id']}<br>Time: {row['time']:.2f}<br>Sources: {source_radars}<br>Measurements: {source_details}<br>Prob: {prob_val:.3f}"
+            )
+        else:
+            fused_hover.append(
+                f"Fused ID: {row['global_track_id']}<br>Time: {row['time']:.2f}<br>Sources: {source_radars}<br>Prob: {prob_val:.3f}"
+            )
 
     gt_lat = []
     gt_lon = []
@@ -163,13 +171,24 @@ def main():
             "Eğer `source_measurement_details` sütunu da yoksa, sadece radar isimleri gösterilir."
         )
 
+    show_measurement_details = st.sidebar.checkbox(
+        "Measurement details göster",
+        value=False,
+        help="Kapalıyken bu alan hover ve tabloda gizlenir. Büyük CSV'lerde performansı artırır.",
+    )
+
     if "source_radars" in fused_df.columns:
         missing_sources = fused_df["source_radars"].isna() | (fused_df["source_radars"].astype(str).str.strip() == "")
         if missing_sources.any():
             count_missing = missing_sources.sum()
             st.warning(f"Fused CSV'de {count_missing} kayıt için source_radars boş. Bu noktalar Unknown olarak görünebilir.")
 
-    data, ref_lat, ref_lon = build_map_data(gt_df, sensor_df, fused_df)
+    data, ref_lat, ref_lon = build_map_data(
+        gt_df,
+        sensor_df,
+        fused_df,
+        show_measurement_details=show_measurement_details,
+    )
 
     st.markdown(
         "Bu uygulama, her radarın farklı renkte ölçümlerini, ground truth rotasını açık gri çizgi olarak ve füzyon sonuçlarını tıklanabilir noktalar olarak gösterir."
@@ -308,7 +327,9 @@ def main():
     if not fused_df.empty:
         st.subheader("Seçili Zaman Aralığındaki Fusion Noktaları")
         # Sadece CSV dosyasında GERÇEKTEN var olan sütunları filtrele (Çökmeyi engeller)
-        istenen_sutunlar = ["time", "global_track_id", "x", "y", "fused_tq", "prob", "n_sources", "source_radars", "source_measurement_details"]
+        istenen_sutunlar = ["time", "global_track_id", "x", "y", "fused_tq", "prob", "n_sources", "source_radars"]
+        if show_measurement_details:
+            istenen_sutunlar.append("source_measurement_details")
         gosterilecek_sutunlar = [col for col in istenen_sutunlar if col in fused_df.columns]
         st.dataframe(
             fused_df[(fused_df["time"] >= selected_time[0]) & (fused_df["time"] <= selected_time[1])][
