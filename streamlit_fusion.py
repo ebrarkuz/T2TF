@@ -262,7 +262,6 @@ def build_cesium_html(
                 if len(pts) >= 2:
                         fused_routes.append({"route_id": str(route_id), "points": pts})
 
-        # Merkez/kamera hesabı da sadece finite (NaN olmayan) değerler üzerinden yapılıyor
         combined = pd.concat([gt_frame[["lat", "lon"]], fused_frame[["lat", "lon"]]], ignore_index=True)
         combined = combined[np.isfinite(combined["lat"]) & np.isfinite(combined["lon"])]
         center_lat = float(combined["lat"].mean()) if not combined.empty else float(ref_lat)
@@ -310,16 +309,18 @@ def build_cesium_html(
                     const gtRoutes = {gt_json};
                     const fusedRoutes = {fused_json};
 
-                    // KRİTİK: baseLayer:false vermezsen Cesium Viewer varsayılan
-                    // olarak Ion üzerinden Bing katmanı yüklemeye çalışır. Ion
-                    // token yoksa bu istek sessizce/console'da 401 ile
-                    // başarısız olur ve globe tamamen siyah kalır.
+                    // DÜZELTME 1: BaseLayer doğrudan Viewer içinde tanımlandı. (Siyah Ekranı Çözer)
                     const viewer = new Cesium.Viewer('cesiumContainer', {{
-                        baseLayer: false,
                         timeline: false,
                         animation: false,
                         sceneModePicker: true,
                         baseLayerPicker: false,
+                        baseLayer: new Cesium.ImageryLayer(new Cesium.UrlTemplateImageryProvider({{
+                            url: 'https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}.png',
+                            subdomains: ['a', 'b', 'c', 'd'],
+                            maximumLevel: 19,
+                            credit: '© OpenStreetMap contributors © CARTO'
+                        }})),
                         geocoder: false,
                         homeButton: true,
                         fullscreenButton: true,
@@ -328,61 +329,26 @@ def build_cesium_html(
                         selectionIndicator: false,
                     }});
 
-                    // Ion token gerektirmeyen, CORS destekli, subdomain'li
-                    // (a/b/c/d) CartoDB "Positron" (light) katmanı.
-                    // tile.openstreetmap.org doğrudan tarayıcıdan yoğun
-                    // istekte sık sık 403/429 dönüp aynı siyah ekrana yol
-                    // açabiliyor; CartoDB bunun için daha stabil.
-                    const baseLayer = new Cesium.UrlTemplateImageryProvider({{
-                        url: 'https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png',
-                        subdomains: ['a', 'b', 'c', 'd'],
-                        credit: '© OpenStreetMap contributors © CARTO',
-                        maximumLevel: 19,
-                    }});
-
-                    let osmFallbackAdded = false;
-                    let cartoErrorCount = 0;
-                    baseLayer.errorEvent.addEventListener(() => {{
-                        cartoErrorCount++;
-                        // CartoDB de erişilemezse tek seferlik OSM fallback ekle
-                        if (!osmFallbackAdded && cartoErrorCount > 5) {{
-                            osmFallbackAdded = true;
-                            viewer.imageryLayers.addImageryProvider(
-                                new Cesium.UrlTemplateImageryProvider({{
-                                    url: 'https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
-                                    subdomains: ['a', 'b', 'c'],
-                                    credit: '© OpenStreetMap contributors',
-                                    maximumLevel: 19,
-                                }})
-                            );
-                        }}
-                    }});
-
-                    viewer.imageryLayers.addImageryProvider(baseLayer);
                     viewer.scene.globe.depthTestAgainstTerrain = false;
                     viewer.scene.skyBox.show = false;
                     viewer.scene.skyAtmosphere.show = true;
-                    viewer.scene.backgroundColor = Cesium.Color.BLACK;
 
                     function addRoute(route, color, width, routeType) {{
                         const flat = [];
                         for (const p of route.points) {{
-                            // Python tarafı NaN'leri zaten attı; burada ikinci
-                            // güvenlik katmanı olarak duruyor.
                             if (Number.isFinite(p.lon) && Number.isFinite(p.lat) && Number.isFinite(p.alt)) {{
                                 flat.push(p.lon, p.lat, p.alt);
                             }}
                         }}
 
-                        // Çizgi (polyline) artık kesintisiz çiziliyor çünkü
-                        // flat dizisinde 0,0 sıçramaları yok
                         if (flat.length >= 6) {{
                             viewer.entities.add({{
                                 polyline: {{
                                     positions: Cesium.Cartesian3.fromDegreesArrayHeights(flat),
                                     width: width,
                                     material: color,
-                                    arcType: Cesium.ArcType.NONE
+                                    // DÜZELTME 2: arcType NONE kaldırıldı, GEODESIC yapıldı. Çizgiler artık yerin altına girmeyecek.
+                                    arcType: Cesium.ArcType.GEODESIC
                                 }}
                             }});
                         }}
@@ -407,16 +373,16 @@ def build_cesium_html(
                         }}
                     }}
 
-                    // Ground Truth Rotaları (MAVİ)
+                    // Rotaları Çiz
                     for (const route of gtRoutes) {{
                         addRoute(route, Cesium.Color.DODGERBLUE, 4, 'Ground Truth');
                     }}
 
-                    // Füzyon Rotaları (KIRMIZI)
                     for (const route of fusedRoutes) {{
                         addRoute(route, Cesium.Color.RED, 5, 'Fused');
                     }}
 
+                    // Kamerayı Ayarla
                     viewer.camera.setView({{
                         destination: Cesium.Cartesian3.fromDegrees({center_lon}, {center_lat}, {camera_height}),
                         orientation: {{
@@ -426,6 +392,7 @@ def build_cesium_html(
                         }}
                     }});
 
+                    // Tooltip Mantığı
                     const tip = document.getElementById('tip');
                     const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
                     handler.setInputAction((movement) => {{
@@ -446,7 +413,6 @@ def build_cesium_html(
         """
 
         return html, len(gt_routes), len(fused_routes), center_lat, center_lon
-
 
 def build_map_data(
     gt_df: pd.DataFrame,
@@ -734,26 +700,30 @@ def main():
 
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("3B Görünüm (Cesium)")
-    st.caption("2B harita korunur; bu panelde z ekseniyle kamerayı serbestçe döndürüp eğebilirsin.")
+    st.subheader("3B Görünüm (PyDeck)")
+    st.caption("Farenin sağ tuşuna (veya Shift + Sol Tık) basılı tutarak haritayı 3 boyutlu uzayda eğip döndürebilirsin.")
 
-    cesium_pitch = st.slider("Cesium pitch", min_value=10.0, max_value=85.0, value=55.0, step=1.0)
-    cesium_heading = st.slider("Cesium heading", min_value=-180.0, max_value=180.0, value=20.0, step=1.0)
+    deck_pitch = st.slider("Kamera Eğimi (Pitch)", min_value=0.0, max_value=85.0, value=55.0, step=1.0)
+    deck_bearing = st.slider("Kamera Açısı (Bearing)", min_value=-180.0, max_value=180.0, value=0.0, step=1.0)
 
     gt_3d = gt_df[(gt_df["time"] >= selected_time[0]) & (gt_df["time"] <= selected_time[1])].copy()
     fused_3d = fused_df[(fused_df["time"] >= selected_time[0]) & (fused_df["time"] <= selected_time[1])].copy()
-    cesium_html, gt_route_count, fused_route_count, center_lat_3d, center_lon_3d = build_cesium_html(
+
+    # BOZUK CESIUM YERİNE, KODUNDA HAZIR BEKLEYEN PYDECK FONKSİYONUNU ÇAĞIRIYORUZ
+    deck, gt_route_count, fused_route_count, center_lat_3d, center_lon_3d = build_3d_deck(
         gt_3d,
         fused_3d,
         ref_lat,
         ref_lon,
-        pitch_deg=cesium_pitch,
-        heading_deg=cesium_heading,
+        pitch=deck_pitch,
+        bearing=deck_bearing,
+        zoom=9.0,
     )
 
-    st.sidebar.write(f"**3B rotalar (Cesium):** GT={gt_route_count}, Fusion={fused_route_count}")
-    st.sidebar.write(f"**3B merkez:** {center_lat_3d:.6f}, {center_lon_3d:.6f}")
-    components.html(cesium_html, height=700)
+    st.sidebar.write(f"**3B Rotalar (PyDeck):** GT={gt_route_count}, Fusion={fused_route_count}")
+    
+    # SİHİRLİ SATIR: Streamlit'in native (kendi içindeki) 3D render motorunu kullan
+    st.pydeck_chart(deck, use_container_width=True)
 
     if not fused_df.empty:
         st.subheader("Seçili Zaman Aralığındaki Fusion Noktaları")
