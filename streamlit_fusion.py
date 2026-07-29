@@ -508,117 +508,200 @@ def build_animated_map_figure(
     ref_lon: float,
     max_frames: int = 250
 ) -> go.Figure:
-    """Simülasyon bitince elde edilen verilerden Tek Parça Animasyonlu Plotly haritası üretir."""
-    all_times = sorted(sensor_df["time"].unique())
+    import plotly.express as px
+    import numpy as np
+
+    all_times = sorted(sensor_df["time"].dropna().unique())
     if not all_times:
         return go.Figure()
-        
-    # Veri çok büyükse tarayıcıyı çökertmemek için zaman adımlarını seyreltiyoruz (Örn: 6000 satırı 250 frame yapar)
+
     if len(all_times) > max_frames:
         indices = np.linspace(0, len(all_times) - 1, max_frames).astype(int)
         frame_times = [all_times[i] for i in indices]
     else:
         frame_times = all_times
-        
-    sensor_grouped = sensor_df.groupby("time")
-    
-    def get_traces(t_val):
-        # 1. Ground Truth Çizgi ve Nokta
-        gt_past = gt_df[gt_df["time"] <= t_val]
-        gt_lat_lines, gt_lon_lines = [], []
-        gt_lat_pts, gt_lon_pts, gt_texts = [], [], []
-        
-        if not gt_past.empty:
-            callsign_col = "callsign" if "callsign" in gt_past.columns else "target" if "target" in gt_past.columns else None
-            groups = gt_past.groupby(callsign_col) if callsign_col else [(0, gt_past)]
-            for cs, grp in groups:
+
+    # ==========================================
+    # RENK VE ID SABİTLEME 
+    # ==========================================
+    fused_ids_all = sorted(fused_df["global_track_id"].dropna().astype(str).unique()) if not fused_df.empty else []
+    fused_palette = px.colors.qualitative.Dark24
+    fused_color_map = {tid: fused_palette[i % len(fused_palette)] for i, tid in enumerate(fused_ids_all)}
+
+    sensor_ids_all = sorted(sensor_df["sensor"].dropna().astype(str).unique()) if not sensor_df.empty else []
+    fallback_palette = px.colors.qualitative.Set2
+    sensor_color_map = {}
+    fallback_idx = 0
+    for s in sensor_ids_all:
+        s_up = s.upper()
+        if "A" in s_up: sensor_color_map[s] = "#00FFFF" # Radar A: Turkuaz
+        elif "B" in s_up: sensor_color_map[s] = "#FF00FF" # Radar B: Pembe
+        elif "C" in s_up: sensor_color_map[s] = "#FFFF00" # Radar C: Sarı
+        else:
+            sensor_color_map[s] = fallback_palette[fallback_idx % len(fallback_palette)]
+            fallback_idx += 1
+
+    callsigns = []
+    if gt_df is not None and not gt_df.empty:
+        if "callsign" in gt_df.columns: callsigns = sorted(gt_df["callsign"].dropna().unique())
+        elif "target" in gt_df.columns: callsigns = sorted(gt_df["target"].dropna().unique())
+        else: callsigns = ["GT"]
+
+    # ==========================================
+    # KATMAN ÜRETİCİ (BÜG KORUMALI)
+    # ==========================================
+    def get_traces(t_val, is_base_frame=False):
+        traces = []
+
+        # 1. GROUND TRUTH
+        for cs in callsigns:
+            if gt_df is not None and not gt_df.empty:
+                if "callsign" in gt_df.columns: grp = gt_df[(gt_df["time"] <= t_val) & (gt_df["callsign"] == cs)]
+                elif "target" in gt_df.columns: grp = gt_df[(gt_df["time"] <= t_val) & (gt_df["target"] == cs)]
+                else: grp = gt_df[gt_df["time"] <= t_val]
                 grp = grp.sort_values("time")
-                lats, lons = [], []
-                for _, r in grp.iterrows():
-                    la, lo = enu_to_latlon(r["x"], r["y"], ref_lat, ref_lon)
-                    lats.append(la); lons.append(lo)
-                gt_lat_lines.extend(lats + [None])
-                gt_lon_lines.extend(lons + [None])
-                if lats:
-                    gt_lat_pts.append(lats[-1])
-                    gt_lon_pts.append(lons[-1])
-                    gt_texts.append(f"GT: {cs}<br>t={t_val:.1f}")
+            else:
+                grp = pd.DataFrame()
 
-        t_gt_lines = go.Scattermapbox(lat=gt_lat_lines, lon=gt_lon_lines, mode="lines", line=dict(width=2, color="#00CC96"), name="GT Rota", hoverinfo="skip")
-        t_gt_pts = go.Scattermapbox(lat=gt_lat_pts, lon=gt_lon_pts, mode="markers", marker=dict(size=12, color="#00CC96", symbol="circle"), name="GT Anlık", hovertext=gt_texts, hoverinfo="text")
+            lats, lons, texts = [], [], []
+            for _, r in grp.iterrows():
+                la, lo = enu_to_latlon(r["x"], r["y"], ref_lat, ref_lon)
+                lats.append(la); lons.append(lo)
+                texts.append(f"GT: {cs}<br>t={r['time']:.2f}s")
 
-        # 2. Fused Çizgi ve Nokta
-        fused_past = fused_df[fused_df["time"] <= t_val]
-        fused_lat_lines, fused_lon_lines = [], []
-        fused_lat_pts, fused_lon_pts, fused_texts = [], [], []
-        
-        if not fused_past.empty:
-            for tid, grp in fused_past.groupby("global_track_id"):
-                grp = grp.sort_values("time")
-                lats, lons = [], []
-                for _, r in grp.iterrows():
-                    la, lo = enu_to_latlon(r["x"], r["y"], ref_lat, ref_lon)
-                    lats.append(la); lons.append(lo)
-                fused_lat_lines.extend(lats + [None])
-                fused_lon_lines.extend(lons + [None])
-                if lats:
-                    fused_lat_pts.append(lats[-1])
-                    fused_lon_pts.append(lons[-1])
-                    fused_texts.append(f"Fused ID: {tid}<br>Prob: {grp.iloc[-1]['prob']:.2f}")
+            # Veri yoksa Plotly çökmesin diye np.nan (Tanımsız/Görünmez) kullanıyoruz
+            lat_line = lats if len(lats) > 1 else [np.nan]
+            lon_line = lons if len(lons) > 1 else [np.nan]
+            lat_pt = [lats[-1]] if lats else [np.nan]
+            lon_pt = [lons[-1]] if lons else [np.nan]
+            txt_pt = [texts[-1]] if texts else [""]
 
-        t_fused_lines = go.Scattermapbox(lat=fused_lat_lines, lon=fused_lon_lines, mode="lines", line=dict(width=3, color="#EF553B"), name="Fused İz", hoverinfo="skip")
-        t_fused_pts = go.Scattermapbox(lat=fused_lat_pts, lon=fused_lon_pts, mode="markers", marker=dict(size=14, color="#EF553B", symbol="circle"), name="Fused Anlık", hovertext=fused_texts, hoverinfo="text")
+            if is_base_frame:
+                traces.append(go.Scattermapbox(lat=lat_line, lon=lon_line, mode="lines", line=dict(width=2, color="#00CC96"), name=f"GT Rota {cs}", hoverinfo="skip"))
+                traces.append(go.Scattermapbox(lat=lat_pt, lon=lon_pt, mode="markers", marker=dict(size=12, color="#00CC96"), name=f"GT Anlık {cs}", hovertext=txt_pt, hoverinfo="text"))
+            else:
+                traces.append(go.Scattermapbox(lat=lat_line, lon=lon_line))
+                traces.append(go.Scattermapbox(lat=lat_pt, lon=lon_pt, hovertext=txt_pt))
 
-        # 3. Radar Ölçümleri (Sadece o andaki)
-        rad_lats, rad_lons, rad_texts = [], [], []
-        if t_val in sensor_grouped.groups:
-            s_grp = sensor_grouped.get_group(t_val)
+        # 2. FUSED
+        for tid in fused_ids_all:
+            grp = fused_df[(fused_df["time"] <= t_val) & (fused_df["global_track_id"].astype(str) == tid)]
+            grp = grp.sort_values("time")
+            color = fused_color_map[tid]
+
+            lats, lons, texts = [], [], []
+            for _, r in grp.iterrows():
+                la, lo = enu_to_latlon(r["x"], r["y"], ref_lat, ref_lon)
+                lats.append(la); lons.append(lo)
+                prob_val = float(r["prob"]) if "prob" in r and pd.notna(r["prob"]) else 0.0
+                texts.append(f"Fused ID: {tid}<br>t={r['time']:.2f}s<br>Prob: {prob_val:.3f}")
+
+            lat_line = lats if len(lats) > 1 else [np.nan]
+            lon_line = lons if len(lons) > 1 else [np.nan]
+            lat_pt = [lats[-1]] if lats else [np.nan]
+            lon_pt = [lons[-1]] if lons else [np.nan]
+            txt_pt = [texts[-1]] if texts else [""]
+
+            if is_base_frame:
+                traces.append(go.Scattermapbox(lat=lat_line, lon=lon_line, mode="lines", line=dict(width=3, color=color), name=f"Fused İz {tid}", hoverinfo="skip", showlegend=False))
+                traces.append(go.Scattermapbox(lat=lat_pt, lon=lon_pt, mode="markers", marker=dict(size=14, color=color), name=f"Fused {tid}", hovertext=txt_pt, hoverinfo="text", showlegend=False))
+            else:
+                traces.append(go.Scattermapbox(lat=lat_line, lon=lon_line))
+                traces.append(go.Scattermapbox(lat=lat_pt, lon=lon_pt, hovertext=txt_pt))
+
+        # 3. RADAR (KÜMÜLATİF, KAYBOLMAYAN NOKTALAR)
+        radar_past = sensor_df[sensor_df["time"] <= t_val] if not sensor_df.empty else pd.DataFrame()
+        if "is_clutter" in radar_past.columns:
+            radar_past = radar_past[radar_past["is_clutter"] != True]
+
+        for sensor_name in sensor_ids_all:
+            s_grp = radar_past[radar_past["sensor"] == sensor_name]
+            color = sensor_color_map[sensor_name]
+
+            rad_lats, rad_lons, rad_texts = [], [], []
             for _, r in s_grp.iterrows():
                 la, lo = enu_to_latlon(r["x"], r["y"], ref_lat, ref_lon)
                 rad_lats.append(la); rad_lons.append(lo)
-                rad_texts.append(f"Radar: {r.get('sensor','?')}<br>ID: {r.get('local_track_id','?')}")
-                
-        t_radar = go.Scattermapbox(lat=rad_lats, lon=rad_lons, mode="markers", marker=dict(size=10, color="#FFA15A", symbol="cross"), name="Radar", hovertext=rad_texts, hoverinfo="text")
+                rad_texts.append(f"Sensor: {sensor_name}<br>Track: {r.get('local_track_id','?')}<br>t={r['time']:.2f}s")
 
-        return [t_gt_lines, t_gt_pts, t_fused_lines, t_fused_pts, t_radar]
+            lat_rad = rad_lats if rad_lats else [np.nan]
+            lon_rad = rad_lons if rad_lons else [np.nan]
+            txt_rad = rad_texts if rad_texts else [""]
 
-    # Başlangıç frame'ini yarat
-    fig = go.Figure(data=get_traces(frame_times[0]))
-    
-    # Animasyon Frame'lerini yarat
+            if is_base_frame:
+                traces.append(go.Scattermapbox(lat=lat_rad, lon=lon_rad, mode="markers", marker=dict(size=9, color=color), name=f"Radar: {sensor_name}", hovertext=txt_rad, hoverinfo="text"))
+            else:
+                # Sadece koordinat gönderiyoruz, marker komutunu frame içine koymuyoruz!
+                traces.append(go.Scattermapbox(lat=lat_rad, lon=lon_rad, hovertext=txt_rad))
+
+        return traces
+
+    # ==========================================
+    # FİGÜRÜ VE ANİMASYONU OLUŞTURMA
+    # ==========================================
+    fig = go.Figure(data=get_traces(frame_times[0], is_base_frame=True))
+
     frames = []
     for t in frame_times:
-        frames.append(go.Frame(data=get_traces(t), name=str(t)))
+        frames.append(go.Frame(data=get_traces(t, is_base_frame=False), name=str(t)))
     fig.frames = frames
 
-    # Alt kısımdaki Play Butonu ve Zaman Çubuğu (Slider) Tasarımı
     fig.update_layout(
         mapbox=dict(style="carto-darkmatter", center={"lat": ref_lat, "lon": ref_lon}, zoom=7.5),
-        margin={"r":0, "t":40, "l":0, "b":0},
+        margin={"r": 0, "t": 40, "l": 0, "b": 0},
         height=650,
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         updatemenus=[dict(
-            type="buttons",
-            showactive=False,
-            direction="left",
-            x=0.0, xanchor="left", y=-0.05, yanchor="top",
+            type="buttons", showactive=False, direction="left", x=0.0, xanchor="left", y=-0.05, yanchor="top",
             buttons=[
                 dict(label="▶ Oynat", method="animate", args=[None, dict(frame=dict(duration=100, redraw=True), transition=dict(duration=0), fromcurrent=True)]),
                 dict(label="⏸ Duraklat", method="animate", args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate", transition=dict(duration=0))])
             ]
         )],
         sliders=[dict(
-            active=0,
-            x=0.15, xanchor="left", y=-0.05, yanchor="top", len=0.85,
+            active=0, x=0.15, xanchor="left", y=-0.05, yanchor="top", len=0.85,
             currentvalue=dict(font=dict(size=14), prefix="⏱ Zaman: ", suffix=" s", visible=True, xanchor="right"),
-            transition=dict(duration=0, easing="linear"),
-            pad=dict(b=10, t=10),
+            transition=dict(duration=0, easing="linear"), pad=dict(b=10, t=10),
             steps=[dict(args=[[str(t)], dict(frame=dict(duration=0, redraw=True), mode="immediate", transition=dict(duration=0))], label=f"{t:.1f}", method="animate") for t in frame_times]
         )]
     )
     return fig
 
+    # =====================================================================
+    # 3. FİGÜRÜ VE ANİMASYON KARELERİNİ OLUŞTUR
+    # =====================================================================
+    fig = go.Figure(data=get_traces(frame_times[0]))
+
+    frames = []
+    for t in frame_times:
+        frames.append(go.Frame(data=get_traces(t), name=str(t)))
+    fig.frames = frames
+
+    fig.update_layout(
+        mapbox=dict(style="carto-darkmatter", center={"lat": ref_lat, "lon": ref_lon}, zoom=7.5),
+        margin={"r": 0, "t": 40, "l": 0, "b": 0},
+        height=650,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        updatemenus=[dict(
+            type="buttons", showactive=False, direction="left", x=0.0, xanchor="left", y=-0.05, yanchor="top",
+            buttons=[
+                dict(label="▶ Oynat", method="animate",
+                     args=[None, dict(frame=dict(duration=100, redraw=True), transition=dict(duration=0), fromcurrent=True)]),
+                dict(label="⏸ Duraklat", method="animate",
+                     args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate", transition=dict(duration=0))])
+            ]
+        )],
+        sliders=[dict(
+            active=0, x=0.15, xanchor="left", y=-0.05, yanchor="top", len=0.85,
+            currentvalue=dict(font=dict(size=14), prefix="⏱ Zaman: ", suffix=" s", visible=True, xanchor="right"),
+            transition=dict(duration=0, easing="linear"), pad=dict(b=10, t=10),
+            steps=[dict(args=[[str(t)], dict(frame=dict(duration=0, redraw=True), mode="immediate", transition=dict(duration=0))],
+                        label=f"{t:.1f}", method="animate") for t in frame_times]
+        )]
+    )
+    return fig
 
 import pydeck as pdk  # Kütüphane listesinde yoksa en başa eklemeyi unutmayın!
 
@@ -659,6 +742,28 @@ def run_live_fusion_simulation(sensor_csv_path: str, gt_df_for_map: Optional[pd.
     
     map_placeholder = st.empty()
     fused_rows_accum: List[Dict[str, Any]] = []
+    radar_rows_accum: List[Dict[str, Any]] = []
+
+    def radar_bucket(sensor_name: str) -> str:
+        """Radar adini A/B/C olarak kararlı şekilde siniflandirir."""
+        s = str(sensor_name).strip().upper()
+        if not s:
+            return "OTHER"
+
+        # "RADAR_A", "SENSOR-B", "C" gibi adlari token bazli ele al.
+        tokens = s.replace("-", "_").split("_")
+        for tok in reversed(tokens):
+            if tok in {"A", "B", "C"}:
+                return tok
+
+        # Son karakter ile kodlanan adlar icin: "RDRA", "RADARB", "..._C" vb.
+        if s.endswith("A"):
+            return "A"
+        if s.endswith("B"):
+            return "B"
+        if s.endswith("C"):
+            return "C"
+        return "OTHER"
 
     # Harita Kamerası (Siz dokunmadıkça sabit durur, siz dokununca sizin açınızı ezmez)
     view_state = pdk.ViewState(latitude=ref_lat, longitude=ref_lon, zoom=7.5, pitch=0)
@@ -667,7 +772,8 @@ def run_live_fusion_simulation(sensor_csv_path: str, gt_df_for_map: Optional[pd.
         group = grouped.get_group(t_val)
         measurements = []
         for _, row in group.iterrows():
-            if row.get("is_clutter", False): continue
+            if row.get("is_clutter", False):
+                continue
             z_val, vz_val = row.get("z", np.nan), row.get("vz", np.nan)
             
             state = np.array([
@@ -678,6 +784,16 @@ def run_live_fusion_simulation(sensor_csv_path: str, gt_df_for_map: Optional[pd.
             cov = measurement_cov_from_row(row)
             tq = row.get("track_quality", TQ_MAX)
             measurements.append({"state": state, "cov": cov, "tq": tq, "src": (row["sensor"], row.get("local_track_id", "0"))})
+
+            # Radar ölçümlerini kümülatif göstermek için geçmişi biriktiriyoruz.
+            la, lo = enu_to_latlon(row["x"], row["y"], ref_lat, ref_lon)
+            sensor_name = str(row.get("sensor", "?")).strip()
+            radar_rows_accum.append({
+                "lat": la,
+                "lon": lo,
+                "sensor": sensor_name,
+                "id": f"Radar: {sensor_name}",
+            })
             
         fc.process_batch(t_val, measurements)
         step_rows = _confirmed_tracks_to_rows(t_val, fc)
@@ -689,7 +805,7 @@ def run_live_fusion_simulation(sensor_csv_path: str, gt_df_for_map: Optional[pd.
         if step_idx % map_update_every == 0 or step_idx == total_steps - 1:
             gt_path_data, gt_curr_data = [], []
             fused_hist_data, fused_curr_data = [], []
-            rad_curr_data = []
+            rad_a_hist_data, rad_b_hist_data, rad_c_hist_data, rad_other_hist_data = [], [], [], []
 
             # 1. GROUND TRUTH (Geçmiş Çizgisi ve Anlık Nokta)
             if gt_df_for_map is not None:
@@ -722,10 +838,17 @@ def run_live_fusion_simulation(sensor_csv_path: str, gt_df_for_map: Optional[pd.
                 la, lo = enu_to_latlon(r["x"], r["y"], ref_lat, ref_lon)
                 fused_curr_data.append({"lat": la, "lon": lo, "id": f"Fused Anlık: {r['global_track_id']}"})
 
-            # 3. RADAR (O anki ölçümler)
-            for _, r in group.iterrows():
-                la, lo = enu_to_latlon(r["x"], r["y"], ref_lat, ref_lon)
-                rad_curr_data.append({"lat": la, "lon": lo, "id": f"Radar: {r.get('sensor','?')}"})
+            # 3. RADAR (Kümülatif geçmiş ölçümler, sensöre göre renklendirilmiş)
+            for r in radar_rows_accum:
+                bucket = radar_bucket(r.get("sensor", ""))
+                if bucket == "A":
+                    rad_a_hist_data.append(r)
+                elif bucket == "B":
+                    rad_b_hist_data.append(r)
+                elif bucket == "C":
+                    rad_c_hist_data.append(r)
+                else:
+                    rad_other_hist_data.append(r)
 
             # ---- KATMANLARI OLUŞTUR (Layers) ----
             layers = []
@@ -741,28 +864,49 @@ def run_live_fusion_simulation(sensor_csv_path: str, gt_df_for_map: Optional[pd.
             if fused_hist_data:
                 layers.append(pdk.Layer(
                     "ScatterplotLayer", data=fused_hist_data, get_position="[lon, lat]",
-                    get_color="[239, 85, 59, 80]", get_radius=150, pickable=False
+                    get_color="[239, 85, 59, 80]", get_radius=60, pickable=False
                 ))
 
-            # Radar Anlık (Turuncu)
-            if rad_curr_data:
+            # Radar A (Turkuaz)
+            if rad_a_hist_data:
                 layers.append(pdk.Layer(
-                    "ScatterplotLayer", data=rad_curr_data, get_position="[lon, lat]",
-                    get_color="[255, 161, 90, 255]", get_radius=400, pickable=True
+                    "ScatterplotLayer", data=rad_a_hist_data, get_position="[lon, lat]",
+                    get_color="[0, 255, 255, 190]", get_radius=90, pickable=True
+                ))
+
+            # Radar B (Pembe)
+            if rad_b_hist_data:
+                layers.append(pdk.Layer(
+                    "ScatterplotLayer", data=rad_b_hist_data, get_position="[lon, lat]",
+                    get_color="[255, 0, 255, 190]", get_radius=90, pickable=True
+                ))
+
+            # Radar C (Sarı)
+            if rad_c_hist_data:
+                layers.append(pdk.Layer(
+                    "ScatterplotLayer", data=rad_c_hist_data, get_position="[lon, lat]",
+                    get_color="[255, 255, 0, 190]", get_radius=90, pickable=True
+                ))
+
+            # A/B/C dışı sensörler (varsayılan turuncu)
+            if rad_other_hist_data:
+                layers.append(pdk.Layer(
+                    "ScatterplotLayer", data=rad_other_hist_data, get_position="[lon, lat]",
+                    get_color="[255, 161, 90, 180]", get_radius=90, pickable=True
                 ))
 
             # GT Anlık (Büyük Yeşil)
             if gt_curr_data:
                 layers.append(pdk.Layer(
                     "ScatterplotLayer", data=gt_curr_data, get_position="[lon, lat]",
-                    get_color="[0, 204, 150, 255]", get_radius=700, pickable=True
+                    get_color="[0, 204, 150, 255]", get_radius=200, pickable=True
                 ))
 
             # Fused Anlık (Büyük Kırmızı)
             if fused_curr_data:
                 layers.append(pdk.Layer(
                     "ScatterplotLayer", data=fused_curr_data, get_position="[lon, lat]",
-                    get_color="[239, 85, 59, 255]", get_radius=900, pickable=True
+                    get_color="[239, 85, 59, 255]", get_radius=200, pickable=True
                 ))
 
             deck = pdk.Deck(layers=layers, initial_view_state=view_state, tooltip={"text": "{id}"})
