@@ -55,7 +55,7 @@ def frame_matches(fused_frame, gt_states, max_distance=0.0):
 def compute_tracking_metrics(
     gt_df,
     fused_df,
-    max_match_distance=300.0,
+    max_match_distance=500.0,
     evaluation_times=None,
 ):
     """Compute metrics on fused timestamps or on an explicit sensor timeline.
@@ -254,7 +254,7 @@ def compute_target_specific_metrics(
     gt_df,
     fused_df,
     target_callsign,
-    max_match_distance=200.0,
+    max_match_distance=500.0,
     evaluation_times=None,
     prepared_fused_frames=None,
 ):

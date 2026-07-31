@@ -106,7 +106,7 @@ def load_stonesoup_data(gt_csv=STONESOUP_GT_CSV, radar_csv=STONESOUP_RADAR_CSV):
     return gt_df.sort_values("time"), radar_df.sort_values("time")
 
 
-def _metrics_table(gt_df, radar_df, scenarios, max_match_distance=200.0):
+def _metrics_table(gt_df, radar_df, scenarios, max_match_distance=500.0):
     # All algorithms are scored at every sensor scan, including scans where an
     # algorithm emitted no confirmed track.
     evaluation_times = radar_df["time"].dropna().unique().tolist()
@@ -122,7 +122,7 @@ def _metrics_table(gt_df, radar_df, scenarios, max_match_distance=200.0):
     return pd.DataFrame(metrics).T.reindex(columns=METRIC_COLUMNS)
 
 
-def _target_metrics_table(gt_df, radar_df, scenarios, max_match_distance=200.0):
+def _target_metrics_table(gt_df, radar_df, scenarios, max_match_distance=500.0):
     gt_key = "callsign" if "callsign" in gt_df.columns else "target"
     evaluation_times = radar_df["time"].dropna().unique().tolist()
     rows = []
@@ -148,7 +148,7 @@ def _target_metrics_table(gt_df, radar_df, scenarios, max_match_distance=200.0):
 def run_stonesoup_benchmark(
     gt_csv=STONESOUP_GT_CSV,
     radar_csv=STONESOUP_RADAR_CSV,
-    max_match_distance=200.0,
+    max_match_distance=500.0,
     print_report=True,
 ):
     """Run Basic, Advanced and IMM fairly on the same Stone Soup data."""
@@ -229,7 +229,7 @@ def _print_target_metrics(title, target_metrics):
         print(table.round(3).to_string())
 
 
-def run_adsb_benchmark(max_match_distance=200.0, generate_data=False, print_report=True):
+def run_adsb_benchmark(max_match_distance=500.0, generate_data=False, print_report=True):
     """Run the same three algorithms on the user-generated realistic data."""
     if generate_data or not os.path.exists(GERCEKCI_SENSOR_CSV):
         step1_generate_data()
@@ -270,7 +270,7 @@ def run_adsb_benchmark(max_match_distance=200.0, generate_data=False, print_repo
 def run_all_benchmarks(
     gt_csv,
     radar_csv,
-    max_match_distance=200.0,
+    max_match_distance=500.0,
     regenerate_adsb=False,
 ):
     """Compare both datasets with an identical algorithm/metric pipeline."""
@@ -367,7 +367,7 @@ def parse_args():
     )
     parser.add_argument("--gt-csv", default=STONESOUP_GT_CSV)
     parser.add_argument("--radar-csv", default=STONESOUP_RADAR_CSV)
-    parser.add_argument("--max-match-distance", type=float, default=200.0)
+    parser.add_argument("--max-match-distance", type=float, default=500.0)
     parser.add_argument(
         "--regenerate-adsb",
         action="store_true",
