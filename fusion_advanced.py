@@ -19,7 +19,20 @@ warnings.filterwarnings("ignore")
 # KONFIGURASYON & SABITLER
 # ===========================================================================
 PROCESS_NOISE_INTENSITY = 1.5  # CA modelinde "Jerk (İvme değişimi)" varyansını temsil eder
-GATE_CHI2_6DOF = 22.5
+ADAPTIVE_Q_ENABLED = True
+Q_SCALE_MIN = 1.0
+Q_SCALE_MAX = 12.0
+NIS_Q_LOW_THRESHOLD = 6.0
+NIS_Q_HIGH_THRESHOLD = 18.0
+Q_SCALE_UP_FACTOR = 1.8
+Q_SCALE_DOWN_FACTOR = 0.90
+XY_MANEUVER_Q_GAIN = 2.0
+Z_MANEUVER_Q_GAIN = 1.0
+
+BASE_GATE_CHI2_6DOF = 22.5
+GATE_SCALE_MIN = 1.0
+GATE_SCALE_MAX = 1.8
+MAX_ASSOC_VEL_DIFF_MPS = 120.0
 COAST_TIME_LIMIT = 30.0
 CONFIRM_HITS = 2               # minimum number of updates before a track can be CONFIRMED
 DUPLICATE_DIST_M = 150.0       # IMM kodundaki gibi genişletildi
@@ -133,6 +146,34 @@ class GlobalTrack:
         self.creation_time = t
         self.position_history = [(float(self.state[0,0]), float(self.state[3,0]), float(self.state[6,0]), float(t))]
         self.use_ci = use_ci
+        self.q_scale = 1.0
+        self.last_nis = 0.0
+        self.maneuver_score = 0.0
+
+    def update_maneuver_adaptation(self, nis):
+        """Update per-track process-noise scale after an accepted association."""
+        if not ADAPTIVE_Q_ENABLED or not np.isfinite(nis) or nis < 0.0:
+            return
+
+        self.last_nis = float(nis)
+        denominator = NIS_Q_HIGH_THRESHOLD - NIS_Q_LOW_THRESHOLD
+        normalized = (self.last_nis - NIS_Q_LOW_THRESHOLD) / denominator
+        new_score = float(np.clip(normalized, 0.0, 1.0))
+        self.maneuver_score = 0.8 * self.maneuver_score + 0.2 * new_score
+
+        if self.maneuver_score > 0.7:
+            self.q_scale *= Q_SCALE_UP_FACTOR
+        elif self.maneuver_score < 0.2:
+            self.q_scale *= Q_SCALE_DOWN_FACTOR
+
+        self.q_scale = float(np.clip(self.q_scale, Q_SCALE_MIN, Q_SCALE_MAX))
+
+    def get_effective_gate(self):
+        if self.maneuver_score <= 0.6:
+            return BASE_GATE_CHI2_6DOF
+        gate_scale = 1.0 + 0.8 * self.maneuver_score
+        gate_scale = float(np.clip(gate_scale, GATE_SCALE_MIN, GATE_SCALE_MAX))
+        return BASE_GATE_CHI2_6DOF * gate_scale
 
     def propagate(self, t):
         dt = t - self.time
@@ -151,19 +192,25 @@ class GlobalTrack:
             [0,  0,           0, 0,  0,          0, 0,  0,          1],
         ])
         
-        # 9D Süreç Gürültüsü Matrisi
+        # 9D continuous-white-jerk süreç gürültüsü matrisi.
         q = PROCESS_NOISE_INTENSITY ** 2
-        dt2 = dt**2; dt3 = dt**3; dt4 = dt**4
-        qb = q * np.array([
-            [dt4/4, dt3/2, dt2/2],
-            [dt3/2, dt2,   dt],
-            [dt2/2, dt,    1]
+        adaptive_q = q * self.q_scale if ADAPTIVE_Q_ENABLED else q
+        dt2 = dt**2; dt3 = dt**3; dt4 = dt**4; dt5 = dt**5
+        base_q_block = np.array([
+            [dt5/20, dt4/8, dt3/6],
+            [dt4/8, dt3/3, dt2/2],
+            [dt3/6, dt2/2, dt]
         ])
+
+        q_xy = adaptive_q * base_q_block
+        if self.q_scale > 2.0:
+            q_xy *= XY_MANEUVER_Q_GAIN
+        q_z = adaptive_q * base_q_block * Z_MANEUVER_Q_GAIN
         
         Q = np.zeros((9, 9))
-        Q[np.ix_([0,1,2],[0,1,2])] = qb
-        Q[np.ix_([3,4,5],[3,4,5])] = qb
-        Q[np.ix_([6,7,8],[6,7,8])] = qb
+        Q[np.ix_([0,1,2],[0,1,2])] = q_xy
+        Q[np.ix_([3,4,5],[3,4,5])] = q_xy
+        Q[np.ix_([6,7,8],[6,7,8])] = q_z
         
         self.state = F @ self.state
         self.cov = 0.5 * ((F @ self.cov @ F.T + Q) + (F @ self.cov @ F.T + Q).T)
@@ -325,8 +372,20 @@ class FusionCenter:
             diff = H @ gt.state - m["state"]
             
             try:
-                if float((diff.T @ np.linalg.inv(S) @ diff).item()) < GATE_CHI2_6DOF:
+                try:
+                    solved = np.linalg.solve(S, diff)
+                except np.linalg.LinAlgError:
+                    solved = np.linalg.pinv(S) @ diff
+                nis = float((diff.T @ solved).item())
+                velocity_diff = float(np.linalg.norm(diff[[1, 3, 5], 0]))
+                if (
+                    np.isfinite(nis)
+                    and nis >= 0.0
+                    and nis < gt.get_effective_gate()
+                    and velocity_diff <= MAX_ASSOC_VEL_DIFF_MPS
+                ):
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
+                    gt.update_maneuver_adaptation(nis)
                     self.src_map[m["src"]] = gt.id
                     matched_gt.add(gi); matched_m.add(mi)
             except np.linalg.LinAlgError:
@@ -336,6 +395,7 @@ class FusionCenter:
         r_m  = [i for i in range(len(measurements)) if i not in matched_m]
         if r_gt and r_m:
             cost = np.full((len(r_gt), len(r_m)), 1e9) 
+            accepted_nis = np.full((len(r_gt), len(r_m)), np.nan)
             for ri, gi in enumerate(r_gt):
                 gt = self.tracks[gi]
                 for ci, mi in enumerate(r_m):
@@ -343,11 +403,21 @@ class FusionCenter:
                     S = H @ gt.cov @ H.T + m["cov"]
                     diff = H @ gt.state - m["state"]
                     try:
-                        Si = np.linalg.inv(S)
                         _, ld = np.linalg.slogdet(S)
-                        d2 = float((diff.T @ Si @ diff).item())
-                        if d2 < GATE_CHI2_6DOF:
+                        try:
+                            solved = np.linalg.solve(S, diff)
+                        except np.linalg.LinAlgError:
+                            solved = np.linalg.pinv(S) @ diff
+                        d2 = float((diff.T @ solved).item())
+                        velocity_diff = float(np.linalg.norm(diff[[1, 3, 5], 0]))
+                        if (
+                            np.isfinite(d2)
+                            and d2 >= 0.0
+                            and d2 < gt.get_effective_gate()
+                            and velocity_diff <= MAX_ASSOC_VEL_DIFF_MPS
+                        ):
                             cost[ri, ci] = d2 + max(0, ld)
+                            accepted_nis[ri, ci] = d2
                     except np.linalg.LinAlgError:
                         pass
 
@@ -359,6 +429,7 @@ class FusionCenter:
                     gt = self.tracks[gi]
                     m = measurements[mi]
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
+                    gt.update_maneuver_adaptation(accepted_nis[ri, ci])
                     self.src_map[m["src"]] = gt.id
                     matched_gt.add(gi); matched_m.add(mi)
                     
