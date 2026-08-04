@@ -33,7 +33,34 @@ Başlıca çıktılar:
 Eşleştirme mesafesi değiştirilebilir:
 
 ```bash
-python main.py --max-match-distance 750
+python main.py --max-match-distance 400
+```
+
+## Hedef 5 – AKINCI-benzeri sentetik profil
+
+`ground_truth_adsb_multi.csv`, idealize radar ve gerçekçi radar dosyalarında
+`HEDEF_5` bulunur. Profil 77 m/s sabit toplam hızla, yaklaşık 1800 m başlangıç
+yarıçaplı 360° yükselen bir spiral üretir; rota boyunca dönüş ve tırmanış sürer.
+
+Hedef 5'e özel hafif analiz senaryosu ve IMM çıktısı:
+
+- `ground_truth_adsb_multi_target5.csv`
+- `radar_sensor_tracks_gercekci_target5.csv`
+- `res_target5_imm.csv`
+
+Arayüzü açmak için:
+
+```bash
+streamlit run streamlit_fusion.py
+```
+
+Ardından çalışma modu olarak **Hedef 5 – AKINCI 3B Füzyon Analizi** seçilir.
+Form gönderilmedikçe ağır füzyon yeniden çalıştırılmaz.
+
+Hedef 5 testleri:
+
+```bash
+python -m unittest test_target5_akinci.py
 ```
 
 ## Görselleştirme
@@ -41,17 +68,6 @@ python main.py --max-match-distance 750
 ```bash
 streamlit run streamlit_fusion.py
 ```
-
-## İsteğe bağlı Stone Soup akışı
-
-Stone Soup ana çalışma akışından ayrılmıştır. Özellikle ihtiyaç duyulursa:
-
-```bash
-python stone.py
-python stonesoup_benchmark.py
-```
-
-Bu komutlar `main.py` tarafından otomatik olarak çalıştırılmaz.
 
 ## Proje yapısı
 
@@ -61,5 +77,5 @@ Bu komutlar `main.py` tarafından otomatik olarak çalıştırılmaz.
 - `fusion_imm.py`: IMM tabanlı füzyon algoritmasıdır.
 - `fusion_evaluation.py`: Performans metriklerini hesaplar.
 - `main.py`: Yalnızca ADS-B tabanlı ana benchmark akışıdır.
-- `stonesoup_benchmark.py`: İsteğe bağlı, bağımsız Stone Soup benchmark akışıdır.
+- `target5_akinci.py`: Hedef 5 yörüngesi, ayrım kontrolü ve radar entegrasyonudur.
 - `streamlit_fusion.py`: Sonuçları interaktif olarak görselleştirir.

@@ -800,6 +800,12 @@ def generate_sensor_csvs(
 
     sensor_idealize = (pd.concat(all_idealize, ignore_index=True)
                          .sort_values("time").reset_index(drop=True))
+    if "HEDEF_5" in set(sensor_idealize["callsign_true"].astype(str)):
+        from target5_akinci import TARGET5_CALLSIGN, combine_sensor_measurements
+        target5_rows = sensor_idealize[
+            sensor_idealize["callsign_true"].astype(str) == TARGET5_CALLSIGN
+        ]
+        sensor_idealize = combine_sensor_measurements(sensor_idealize, target5_rows)
     sensor_idealize.to_csv(idealize_csv, index=False)
     print(f"\n  -> '{idealize_csv}' kaydedildi "
           f"({len(sensor_idealize)} toplam kayit)\n")
@@ -833,6 +839,12 @@ def generate_sensor_csvs(
 
     sensor_gercekci = (pd.concat(all_gercekci, ignore_index=True)
                          .sort_values("time").reset_index(drop=True))
+    if "HEDEF_5" in set(sensor_gercekci["callsign_true"].astype(str)):
+        from target5_akinci import TARGET5_CALLSIGN, combine_sensor_measurements
+        target5_rows = sensor_gercekci[
+            sensor_gercekci["callsign_true"].astype(str) == TARGET5_CALLSIGN
+        ]
+        sensor_gercekci = combine_sensor_measurements(sensor_gercekci, target5_rows)
     sensor_gercekci.to_csv(gercekci_csv, index=False)
     print(f"\n  -> '{gercekci_csv}' kaydedildi "
           f"({len(sensor_gercekci)} toplam kayit)\n")

@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 
+from target5_akinci import generate_target5_akinci_climbing_arc
+
 
 def enu_to_latlon(x, y, ref_lat, ref_lon):
     """ENU koordinatlarından lat/lon'a dönüş"""
@@ -137,16 +139,25 @@ df4[["lat", "lon"]] = df4.apply(
 
 
 # ============================================================
-# 5. Dört uçağın verilerini birleştir
+# 5. Hedef 5: AKINCI-benzeri tırmanışlı yay rotası
+# ============================================================
+
+df_existing_targets = pd.concat([df1, df2, df3, df4], ignore_index=True)
+df5 = generate_target5_akinci_climbing_arc(
+    other_ground_truth=df_existing_targets,
+)
+for target, separation in df5.attrs["minimum_separations_m"].items():
+    print(f"Target 5 minimum separation from {target}: {separation:.1f} m")
+
+
+# ============================================================
+# 6. Beş uçağın verilerini birleştir
 # ============================================================
 
 df_multi = pd.concat(
-    [
-        df1,
-        df2,
-        df3,
-        df4
-    ]
+    [df_existing_targets, df5],
+    ignore_index=True,
+    sort=False,
 ).sort_values(
     "time"
 ).reset_index(
@@ -155,7 +166,7 @@ df_multi = pd.concat(
 
 
 # ============================================================
-# 6. Yeni veri setini kaydet
+# 7. Yeni veri setini kaydet
 # ============================================================
 
 df_multi.to_csv(
@@ -165,5 +176,5 @@ df_multi.to_csv(
 
 print(
     "Çoklu hedef verisi başarıyla oluşturuldu: "
-    "ground_truth_adsb_multi.csv (4 Hedef)"
+    "ground_truth_adsb_multi.csv (5 Hedef)"
 )

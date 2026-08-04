@@ -113,7 +113,7 @@ OUTPUT_COLUMNS = [
     "sigma_vz_mps", "fused_tq", "prob", "mode_prob_xy_cv",
     "mode_prob_xy_ca", "mode_prob_xy_ct_left", "mode_prob_xy_ct_right",
     "mode_prob_z_cv", "mode_prob_z_singer", "dominant_model", "n_sources",
-    "source_radars",
+    "source_radars", "update_used", "is_prediction_only", "time_since_update_s",
 ]
 DEBUG_OUTPUT_COLUMNS = [
     "min_cov_eig", "max_cov_eig", "cov_condition_number",
@@ -742,13 +742,17 @@ class GlobalTrackIMM3:
 # FUZYON MERKEZI 
 # ===========================================================================
 class FusionCenterIMM3:
-    def __init__(self, use_ci=True, verbose=True, debug=False):
+    def __init__(self, use_ci=True, verbose=True, debug=False, collect_diagnostics=False):
         self.tracks: List[GlobalTrackIMM3] = []
         self.src_map: Dict[Tuple, dict] = {}
         self.use_ci = use_ci
         self.verbose = verbose
         self.debug = debug
+        self.collect_diagnostics = bool(collect_diagnostics)
         self.recently_deleted: List[dict] = [] 
+        # Read-only association audit trail.  It does not participate in any
+        # filtering or association decision.
+        self.diagnostic_events: List[dict] = []
 
     def _source_track_id(self, src, current_time):
         entry = self.src_map.get(src)
@@ -829,10 +833,37 @@ class FusionCenterIMM3:
     def process_batch(self, t, measurements):
         for gt in self.tracks:
             gt.propagate(t)
+
+        batch_diag = [{
+            "event_type": "measurement",
+            "time": float(t),
+            "label": str(m.get("diagnostic_label", "")),
+            "sensor": str(m["src"][0]),
+            "local_track_id": str(m["src"][1]),
+            "source_map_track_id": None,
+            "source_d2_xy": np.nan,
+            "source_gate_xy": np.nan,
+            "source_d2_z": np.nan,
+            "source_gate_z": np.nan,
+            "source_xy_rejected": False,
+            "source_z_rejected": False,
+            "accepted_stage": "",
+            "assigned_global_track_id": None,
+            "created": False,
+            "revived": False,
+        } for m in measurements]
             
         deleted_tracks = [gt for gt in self.tracks if gt.status == "DELETED"]
         deleted_ids = {gt.id for gt in deleted_tracks}
         for gt in deleted_tracks:
+            if self.collect_diagnostics:
+                for label in sorted(getattr(gt, "_diagnostic_labels", set())):
+                    self.diagnostic_events.append({
+                        "event_type": "track_deleted",
+                        "time": float(t),
+                        "label": str(label),
+                        "assigned_global_track_id": str(gt.id),
+                    })
             self.recently_deleted.append({
                 'delete_time': t,
                 'track': gt
@@ -865,6 +896,7 @@ class FusionCenterIMM3:
             if gi in matched_gt:
                 continue
             gt = self.tracks[gi]
+            batch_diag[mi]["source_map_track_id"] = str(gt.id)
             S = H_MEAS_9D @ gt.cov @ H_MEAS_9D.T + m["cov"]
             diff = H_MEAS_9D @ gt.state - m["state"]
             try:
@@ -881,11 +913,24 @@ class FusionCenterIMM3:
                 diff_z = diff[idx_z]
                 d2_z = _mahalanobis_squared(diff_z, S_z)
 
+                batch_diag[mi].update({
+                    "source_d2_xy": float(d2_xy),
+                    "source_gate_xy": float(gate_xy),
+                    "source_d2_z": float(d2_z),
+                    "source_gate_z": float(gate_z),
+                    "source_xy_rejected": bool(d2_xy >= gate_xy),
+                    "source_z_rejected": bool(d2_z >= gate_z),
+                })
+
                 if d2_xy < gate_xy and d2_z < gate_z:
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
+                    gt._diagnostic_labels = getattr(gt, "_diagnostic_labels", set())
+                    gt._diagnostic_labels.add(str(m.get("diagnostic_label", "")))
                     self._remember_source(m["src"], gt.id, t)
                     matched_gt.add(gi)
                     matched_m.add(mi)
+                    batch_diag[mi]["accepted_stage"] = "source_map"
+                    batch_diag[mi]["assigned_global_track_id"] = str(gt.id)
             except np.linalg.LinAlgError:
                 continue
 
@@ -926,9 +971,13 @@ class FusionCenterIMM3:
                     gt = self.tracks[gi]
                     m = measurements[mi]
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
+                    gt._diagnostic_labels = getattr(gt, "_diagnostic_labels", set())
+                    gt._diagnostic_labels.add(str(m.get("diagnostic_label", "")))
                     self._remember_source(m["src"], gt.id, t)
                     matched_gt.add(gi)
                     matched_m.add(mi)
+                    batch_diag[mi]["accepted_stage"] = "hungarian"
+                    batch_diag[mi]["assigned_global_track_id"] = str(gt.id)
 
         # Adım 3: Hiçbir aktif track'e atanamayan ölçümler için (Revive veya Create)
         for mi, m in enumerate(measurements):
@@ -988,18 +1037,29 @@ class FusionCenterIMM3:
                 revived_gt.status = "TENTATIVE" 
                 revived_gt.existence_prob = max(0.4, revived_gt.existence_prob * 0.8)
                 revived_gt.update(m["state"], m["cov"], m["tq"], m["src"])
+                revived_gt._diagnostic_labels = getattr(revived_gt, "_diagnostic_labels", set())
+                revived_gt._diagnostic_labels.add(str(m.get("diagnostic_label", "")))
                 
                 self.tracks.append(revived_gt)
                 self._remember_source(m["src"], revived_gt.id, t)
+                batch_diag[mi]["accepted_stage"] = "revive"
+                batch_diag[mi]["assigned_global_track_id"] = str(revived_gt.id)
+                batch_diag[mi]["revived"] = True
             else:
                 ng = GlobalTrackIMM3(
                     t, m["state"], m["cov"], m["tq"], m["src"],
                     use_ci=self.use_ci, debug=self.debug,
                 )
                 self.tracks.append(ng)
+                ng._diagnostic_labels = {str(m.get("diagnostic_label", ""))}
                 self._remember_source(m["src"], ng.id, t)
+                batch_diag[mi]["accepted_stage"] = "create"
+                batch_diag[mi]["assigned_global_track_id"] = str(ng.id)
+                batch_diag[mi]["created"] = True
 
         self._merge_duplicates(t)
+        if self.collect_diagnostics:
+            self.diagnostic_events.extend(batch_diag)
 
 # ===========================================================================
 # ANA YURUTME
@@ -1012,6 +1072,7 @@ def run_imm3_fusion(
     include_source_measurement_details=False,
     *,
     include_debug_fields=False,
+    diagnostics_csv=None,
 ) -> pd.DataFrame:
     if verbose:
         mode_str = (
@@ -1026,7 +1087,10 @@ def run_imm3_fusion(
 
     GlobalTrackIMM3._cnt = 0
     fc = FusionCenterIMM3(
-        use_ci=use_ci, verbose=verbose, debug=include_debug_fields
+        use_ci=use_ci,
+        verbose=verbose,
+        debug=include_debug_fields,
+        collect_diagnostics=diagnostics_csv is not None,
     )
     output_records = []
 
@@ -1062,6 +1126,7 @@ def run_imm3_fusion(
                 "cov": cov,
                 "tq": tq,
                 "src": (row["sensor"], row["local_track_id"]),
+                "diagnostic_label": row.get("callsign_true", ""),
             })
         fc.process_batch(t_val, measurements)
 
@@ -1108,6 +1173,9 @@ def run_imm3_fusion(
                 "dominant_model": gt.dominant_model(),
                 "n_sources": len(gt.source_radar_names),
                 "source_radars": source_names,
+                "update_used": bool(math.isclose(float(gt.last_update), float(t_val), abs_tol=1e-9)),
+                "is_prediction_only": not bool(math.isclose(float(gt.last_update), float(t_val), abs_tol=1e-9)),
+                "time_since_update_s": max(0.0, float(t_val) - float(gt.last_update)),
             }
             if include_source_measurement_details:
                 rec["source_measurement_details"] = "; ".join(sorted(gt.source_measurement_details))
@@ -1132,6 +1200,9 @@ def run_imm3_fusion(
             print(f"[!] Hic CONFIRMED track olusamadi. Bos CSV olusturuldu: {output_csv}")
         print(f"Cikti dosyasi: {output_csv}")
 
+    if diagnostics_csv is not None:
+        pd.DataFrame(fc.diagnostic_events).to_csv(diagnostics_csv, index=False)
+
     return fused_df
 
 def run_imm_fusion(
@@ -1142,6 +1213,7 @@ def run_imm_fusion(
     include_source_measurement_details=False,
     *,
     include_debug_fields=False,
+    diagnostics_csv=None,
 ) -> pd.DataFrame:
     return run_imm3_fusion(
         sensor_csv=sensor_csv,
@@ -1150,6 +1222,7 @@ def run_imm_fusion(
         use_ci=use_ci,
         include_source_measurement_details=include_source_measurement_details,
         include_debug_fields=include_debug_fields,
+        diagnostics_csv=diagnostics_csv,
     )
 
 if __name__ == "__main__":
