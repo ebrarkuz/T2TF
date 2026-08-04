@@ -19,9 +19,30 @@ warnings.filterwarnings("ignore")
 # KONFIGURASYON & SABITLER
 # ===========================================================================
 PROCESS_NOISE_INTENSITY = 1.5  # CA modelinde "Jerk (İvme değişimi)" varyansını temsil eder
-GATE_CHI2_6DOF = 22.5
+ADAPTIVE_Q_ENABLED = True
+Q_SCALE_MIN = 1.0
+Q_SCALE_MAX = 12.0
+NIS_Q_LOW_THRESHOLD = 6.0
+NIS_Q_HIGH_THRESHOLD = 18.0
+Q_SCALE_UP_FACTOR = 1.8
+Q_SCALE_DOWN_FACTOR = 0.90
+XY_MANEUVER_Q_GAIN = 2.0
+Z_MANEUVER_Q_GAIN = 1.0
+
+BASE_GATE_CHI2_6DOF = 22.5
+GATE_SCALE_MIN = 1.0
+GATE_SCALE_MAX = 1.8
+MAX_ASSOC_VEL_DIFF_MPS = 120.0
+MAX_ASSOC_ACCEL_MPS2 = 30.0
+MAX_POSITION_INNOVATION_M = 750.0
+POSITION_GATE_SIGMA = 3.0
+VELOCITY_GATE_SIGMA = 3.0
+MIN_ACCEL_DT_S = 1.0
 COAST_TIME_LIMIT = 30.0
-CONFIRM_HITS = 2               # minimum number of updates before a track can be CONFIRMED
+CONFIRMED_OUTPUT_COAST_S = 2.0
+CONFIRM_HITS = 6               # minimum number of updates before a track can be CONFIRMED
+MIN_CONFIRM_AGE_S = 8.0
+MIN_CONFIRM_SENSORS = 2
 DUPLICATE_DIST_M = 150.0       # IMM kodundaki gibi genişletildi
 DUPLICATE_VEL_MPS = 30.0       # YENI: Paralel track'lerin maks hız farkı (m/s)
 DUPLICATE_TIME_S = 5.0         # time window for duplicate appearance check (seconds)
@@ -61,6 +82,40 @@ def measurement_cov_from_row(row) -> np.ndarray:
         sv = float(row["sigma_vel_mps"])
         return np.diag([sp**2, sv**2, sp**2, sv**2, sp**2, sv**2])
     return tq_to_cov(row["track_quality"])
+
+
+def _passes_physical_association_gates(gt, diff, innovation_cov) -> bool:
+    """Belirsizliği hesaba katan konum, hız ve ivme tutarlılık kontrolü."""
+    pos_indices = [0, 2, 4]
+    vel_indices = [1, 3, 5]
+    diagonal = np.maximum(np.diag(innovation_cov), 0.0)
+
+    pos_diff = float(np.linalg.norm(diff[pos_indices, 0]))
+    velocity_diff = float(np.linalg.norm(diff[vel_indices, 0]))
+    pos_sigma = math.sqrt(float(np.sum(diagonal[pos_indices])))
+    velocity_sigma = math.sqrt(float(np.sum(diagonal[vel_indices])))
+
+    # Sabit 750 m kapı, düşük TQ ve uzak menzilde geçerli ölçümleri kesiyordu.
+    # Gate taban değerin altına düşmez, belirsizlik büyüdüğünde adaptif genişler.
+    position_limit = max(
+        MAX_POSITION_INNOVATION_M,
+        POSITION_GATE_SIGMA * pos_sigma,
+    )
+
+    # Ham hız farkının tamamını ivme saymak, yakın zamanlı iki radar ölçümünde
+    # gürültüyü devasa bir ivmeye dönüştürüyordu. Önce 3-sigma ölçüm payını düş.
+    unexplained_velocity = max(
+        0.0,
+        velocity_diff - VELOCITY_GATE_SIGMA * velocity_sigma,
+    )
+    update_dt = max(gt.time - gt.last_update, MIN_ACCEL_DT_S)
+    implied_accel = unexplained_velocity / update_dt
+
+    return (
+        velocity_diff <= MAX_ASSOC_VEL_DIFF_MPS
+        and implied_accel <= MAX_ASSOC_ACCEL_MPS2
+        and pos_diff <= position_limit
+    )
 
 def _pad_6d_to_9d(state_6d, cov_6d):
     """6D ölçümü 9D (3B sabit ivme) duruma genişletir. İvme varyansı devasa bırakılır."""
@@ -112,7 +167,10 @@ def _standard_fuse(x1, P1, x2, P2):
 
 class GlobalTrack:
     _cnt = 0
-    def __init__(self, t, state, cov, tq, src, use_ci=True):
+    def __init__(
+        self, t, state, cov, tq, src, use_ci=True,
+        adaptive_q_enabled=ADAPTIVE_Q_ENABLED,
+    ):
         GlobalTrack._cnt += 1
         self.id = f"GT-{GlobalTrack._cnt:04d}"
         self.time = t
@@ -133,6 +191,38 @@ class GlobalTrack:
         self.creation_time = t
         self.position_history = [(float(self.state[0,0]), float(self.state[3,0]), float(self.state[6,0]), float(t))]
         self.use_ci = use_ci
+        self.adaptive_q_enabled = adaptive_q_enabled
+        self.q_scale = 1.0
+        self.last_nis = 0.0
+        self.maneuver_score = 0.0
+
+    def update_maneuver_adaptation(self, nis):
+        """Update per-track process-noise scale after an accepted association."""
+        if not np.isfinite(nis) or nis < 0.0:
+            return
+
+        self.last_nis = float(nis)
+        denominator = NIS_Q_HIGH_THRESHOLD - NIS_Q_LOW_THRESHOLD
+        normalized = (self.last_nis - NIS_Q_LOW_THRESHOLD) / denominator
+        new_score = float(np.clip(normalized, 0.0, 1.0))
+        self.maneuver_score = 0.8 * self.maneuver_score + 0.2 * new_score
+
+        if not self.adaptive_q_enabled:
+            return
+
+        if self.maneuver_score > 0.7:
+            self.q_scale *= Q_SCALE_UP_FACTOR
+        elif self.maneuver_score < 0.2:
+            self.q_scale *= Q_SCALE_DOWN_FACTOR
+
+        self.q_scale = float(np.clip(self.q_scale, Q_SCALE_MIN, Q_SCALE_MAX))
+
+    def get_effective_gate(self):
+        if self.maneuver_score <= 0.6:
+            return BASE_GATE_CHI2_6DOF
+        gate_scale = 1.0 + 0.8 * self.maneuver_score
+        gate_scale = float(np.clip(gate_scale, GATE_SCALE_MIN, GATE_SCALE_MAX))
+        return BASE_GATE_CHI2_6DOF * gate_scale
 
     def propagate(self, t):
         dt = t - self.time
@@ -151,24 +241,31 @@ class GlobalTrack:
             [0,  0,           0, 0,  0,          0, 0,  0,          1],
         ])
         
-        # 9D Süreç Gürültüsü Matrisi
+        # 9D continuous-white-jerk süreç gürültüsü matrisi.
         q = PROCESS_NOISE_INTENSITY ** 2
-        dt2 = dt**2; dt3 = dt**3; dt4 = dt**4
-        qb = q * np.array([
-            [dt4/4, dt3/2, dt2/2],
-            [dt3/2, dt2,   dt],
-            [dt2/2, dt,    1]
+        adaptive_q = q * self.q_scale if self.adaptive_q_enabled else q
+        dt2 = dt**2; dt3 = dt**3; dt4 = dt**4; dt5 = dt**5
+        base_q_block = np.array([
+            [dt5/20, dt4/8, dt3/6],
+            [dt4/8, dt3/3, dt2/2],
+            [dt3/6, dt2/2, dt]
         ])
+
+        q_xy = adaptive_q * base_q_block
+        if self.q_scale > 2.0:
+            q_xy *= XY_MANEUVER_Q_GAIN
+        q_z = adaptive_q * base_q_block * Z_MANEUVER_Q_GAIN
         
         Q = np.zeros((9, 9))
-        Q[np.ix_([0,1,2],[0,1,2])] = qb
-        Q[np.ix_([3,4,5],[3,4,5])] = qb
-        Q[np.ix_([6,7,8],[6,7,8])] = qb
+        Q[np.ix_([0,1,2],[0,1,2])] = q_xy
+        Q[np.ix_([3,4,5],[3,4,5])] = q_xy
+        Q[np.ix_([6,7,8],[6,7,8])] = q_z
         
         self.state = F @ self.state
         self.cov = 0.5 * ((F @ self.cov @ F.T + Q) + (F @ self.cov @ F.T + Q).T)
         self.time = t
-        self.existence_prob *= 0.97
+        # Olasılığı radar mesajı sayısına göre değil geçen gerçek süreye göre azalt.
+        self.existence_prob *= 0.97 ** dt
         self._update_status()
 
     def update(self, meas_state, meas_cov, tq, src):
@@ -194,16 +291,33 @@ class GlobalTrack:
     def _update_status(self):
         if (self.time - self.last_update) > COAST_TIME_LIMIT or self.existence_prob < 0.2:
             self.status = "DELETED"
-        elif self.existence_prob > 0.85 and self.hits_count >= CONFIRM_HITS:
+        elif self.status == "CONFIRMED":
+            # Doğrulanmış bir track, birkaç ilişkisiz radar olayı yüzünden tekrar
+            # TENTATIVE yapılmaz; yalnızca coast/olasılık silme koşulu sonlandırır.
+            return
+        elif (
+            self.existence_prob > 0.90
+            and self.hits_count >= CONFIRM_HITS
+            and (self.time - self.creation_time) >= MIN_CONFIRM_AGE_S
+            and len(self.source_radar_names) >= MIN_CONFIRM_SENSORS
+        ):
             self.status = "CONFIRMED"
         else:
             self.status = "TENTATIVE"
 
+    def should_emit(self):
+        """Yalnızca yakın zamanda ölçümle desteklenmiş confirmed track'i yayınla."""
+        return (
+            self.status == "CONFIRMED"
+            and (self.time - self.last_update) <= CONFIRMED_OUTPUT_COAST_S
+        )
+
 class FusionCenter:
-    def __init__(self, use_ci=True):
+    def __init__(self, use_ci=True, adaptive_q_enabled=ADAPTIVE_Q_ENABLED):
         self.tracks: List[GlobalTrack] = []
         self.src_map: Dict[Tuple, str] = {}  
         self.use_ci = use_ci
+        self.adaptive_q_enabled = adaptive_q_enabled
 
     def _tracks_are_duplicate(self, t1, t2, chi2_thresh=16.0):
         """
@@ -325,8 +439,19 @@ class FusionCenter:
             diff = H @ gt.state - m["state"]
             
             try:
-                if float((diff.T @ np.linalg.inv(S) @ diff).item()) < GATE_CHI2_6DOF:
+                try:
+                    solved = np.linalg.solve(S, diff)
+                except np.linalg.LinAlgError:
+                    solved = np.linalg.pinv(S) @ diff
+                nis = float((diff.T @ solved).item())
+                if (
+                    np.isfinite(nis)
+                    and nis >= 0.0
+                    and nis < gt.get_effective_gate()
+                    and _passes_physical_association_gates(gt, diff, S)
+                ):
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
+                    gt.update_maneuver_adaptation(nis)
                     self.src_map[m["src"]] = gt.id
                     matched_gt.add(gi); matched_m.add(mi)
             except np.linalg.LinAlgError:
@@ -336,6 +461,7 @@ class FusionCenter:
         r_m  = [i for i in range(len(measurements)) if i not in matched_m]
         if r_gt and r_m:
             cost = np.full((len(r_gt), len(r_m)), 1e9) 
+            accepted_nis = np.full((len(r_gt), len(r_m)), np.nan)
             for ri, gi in enumerate(r_gt):
                 gt = self.tracks[gi]
                 for ci, mi in enumerate(r_m):
@@ -343,11 +469,20 @@ class FusionCenter:
                     S = H @ gt.cov @ H.T + m["cov"]
                     diff = H @ gt.state - m["state"]
                     try:
-                        Si = np.linalg.inv(S)
                         _, ld = np.linalg.slogdet(S)
-                        d2 = float((diff.T @ Si @ diff).item())
-                        if d2 < GATE_CHI2_6DOF:
+                        try:
+                            solved = np.linalg.solve(S, diff)
+                        except np.linalg.LinAlgError:
+                            solved = np.linalg.pinv(S) @ diff
+                        d2 = float((diff.T @ solved).item())
+                        if (
+                            np.isfinite(d2)
+                            and d2 >= 0.0
+                            and d2 < gt.get_effective_gate()
+                            and _passes_physical_association_gates(gt, diff, S)
+                        ):
                             cost[ri, ci] = d2 + max(0, ld)
+                            accepted_nis[ri, ci] = d2
                     except np.linalg.LinAlgError:
                         pass
 
@@ -359,12 +494,17 @@ class FusionCenter:
                     gt = self.tracks[gi]
                     m = measurements[mi]
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
+                    gt.update_maneuver_adaptation(accepted_nis[ri, ci])
                     self.src_map[m["src"]] = gt.id
                     matched_gt.add(gi); matched_m.add(mi)
                     
         for mi, m in enumerate(measurements):
             if mi in matched_m: continue
-            ng = GlobalTrack(t, m["state"], m["cov"], m["tq"], m["src"], use_ci=self.use_ci)
+            ng = GlobalTrack(
+                t, m["state"], m["cov"], m["tq"], m["src"],
+                use_ci=self.use_ci,
+                adaptive_q_enabled=self.adaptive_q_enabled,
+            )
             self.tracks.append(ng)
             self.src_map[m["src"]] = ng.id
 
@@ -379,15 +519,20 @@ def run_advanced_fusion(
     output_csv=OUTPUT_FUSED_CSV,
     verbose=True,
     use_ci=True,
+    adaptive_q_enabled=ADAPTIVE_Q_ENABLED,
 ) -> pd.DataFrame:
     if verbose:
         mode_str = "Covariance Intersection (CI)" if use_ci else "Standard LMMSE (No-CI)"
-        print(f"{mode_str} füzyon çalıştırılıyor: {sensor_csv}")
+        q_mode = "Adaptive Q" if adaptive_q_enabled else "Fixed Q"
+        print(f"{mode_str} + {q_mode} füzyon çalıştırılıyor: {sensor_csv}")
 
     sensor_df = pd.read_csv(sensor_csv)
     fusion_input = sensor_df.copy()
     GlobalTrack._cnt = 0
-    fc = FusionCenter(use_ci=use_ci)
+    fc = FusionCenter(
+        use_ci=use_ci,
+        adaptive_q_enabled=adaptive_q_enabled,
+    )
     output_records = []
 
     for t_val, group in fusion_input.groupby("time", sort=True):
@@ -412,7 +557,7 @@ def run_advanced_fusion(
         fc.process_batch(t_val, measurements)
 
         for gt in fc.tracks:
-            if gt.status == "CONFIRMED":
+            if gt.should_emit():
                 
                 # Eski hatalı ve sınırlı olan duplicate check (mesafe/history kontrolü) 
                 # buradan silinmiştir. Bu işlem artık FusionCenter içindeki

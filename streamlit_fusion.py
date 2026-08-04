@@ -15,10 +15,20 @@ import pydeck as pdk
 # Füzyon algoritması (senin yazdığın, adım adım / step-by-step çalışan modül)
 # ---------------------------------------------------------------------------
 try:
-    from fusion_imm import FusionCenterIMM3, measurement_cov_from_row, TQ_MAX
+    from fusion_imm import FusionCenterIMM3, measurement_cov_from_row, run_imm_fusion, TQ_MAX
     FUSION_AVAILABLE = True
 except ImportError:
     FUSION_AVAILABLE = False
+
+from fusion_evaluation import compute_target_specific_metrics
+from target5_akinci import (
+    TARGET5_CALLSIGN,
+    Target5Parameters,
+    associate_fused_tracks_to_target5,
+    match_fused_to_target5,
+    target_separations,
+    write_target5_scenario,
+)
 
 
 # ===========================================================================
@@ -54,9 +64,29 @@ def enu_to_latlon(x: float, y: float, ref_lat: float, ref_lon: float) -> tuple[f
 # ===========================================================================
 # THREE.JS 3D INSPECTOR (DEĞİŞMEDİ - AYNEN KORUNDU)
 # ===========================================================================
-def build_threejs_html(gt_df: pd.DataFrame, fused_df: pd.DataFrame) -> str:
-    gt_csv_string = gt_df.to_csv(index=False)
-    fused_csv_string = fused_df.to_csv(index=False)
+def build_threejs_html(gt_df, fused_df):
+    gt_cols = ["time", "callsign", "x", "y", "z"]
+    fused_cols = ["time", "global_track_id", "x", "y", "z"]
+
+    def cap_browser_rows(frame: pd.DataFrame, limit: int = 60000) -> pd.DataFrame:
+        """Keep the embedded component comfortably below Streamlit's 200 MB limit."""
+        if len(frame) <= limit:
+            return frame
+        step = int(np.ceil(len(frame) / limit))
+        return frame.iloc[::step].copy()
+
+    gt_df = cap_browser_rows(gt_df)
+    fused_df = cap_browser_rows(fused_df)
+
+    gt_csv_string = gt_df[
+        [c for c in gt_cols if c in gt_df.columns]
+    ].to_csv(index=False)
+
+    fused_csv_string = fused_df[
+        [c for c in fused_cols if c in fused_df.columns]
+    ].to_csv(index=False)
+
+    # HTML oluşturma işlemi...
 
     html_template = """
     <!DOCTYPE html>
@@ -117,6 +147,7 @@ def build_threejs_html(gt_df: pd.DataFrame, fused_df: pd.DataFrame) -> str:
         <div class="section"><h2>2 · Oynatım</h2><div class="rowbtns"><button class="smallbtn" id="playBtn" disabled>▶ Oynat</button><button class="smallbtn" id="speedBtn" disabled>1x</button></div><div id="timeRow"><input type="range" id="timeSlider" min="0" max="0" value="0" step="1" disabled><span id="frameLabel">0 / 0</span></div></div>
         <div class="section"><h2>3 · Açı / Görünüm</h2><div class="rowbtns"><button class="smallbtn" data-view="iso">İzometrik</button><button class="smallbtn" data-view="top">Üstten (X-Y)</button></div><div class="rowbtns" style="margin-top:6px;"><button class="smallbtn" data-view="front">Önden (X-Z)</button><button class="smallbtn" data-view="side">Yandan (Y-Z)</button></div></div>
         <div class="section"><h2>4 · Katmanlar</h2><div class="legend-item"><input type="checkbox" id="toggleGtLine" checked><span class="swatch line" style="background:var(--accent-gt)"></span><span class="lbl">GT rotaları (Statik)</span></div><div class="legend-item"><input type="checkbox" id="toggleFusedTrail" checked><span class="swatch line" style="background:#8ecae6"></span><span class="lbl">Zamanla Uzayan Fused İzleri</span></div><div class="legend-item"><input type="checkbox" id="toggleErrLines" checked><span class="swatch line" style="background:#ffff00"></span><span class="lbl">Bağlantı ve Hata çizgileri</span></div><div class="legend-item"><input type="checkbox" id="toggleAxisBars" checked><span class="swatch line" style="background:linear-gradient(90deg,var(--axis-x),var(--axis-y),var(--axis-z))"></span><span class="lbl">Eksen hata çubukları</span></div><div class="legend-item"><input type="checkbox" id="toggleGrid" checked><span class="swatch" style="background:#172533"></span><span class="lbl">Zemin ızgarası</span></div></div>
+        <div class="section"><h2>Dikey ölçek</h2><select id="verticalScale" class="smallbtn"><option value="1" selected>1x (gerçek)</option><option value="2">2x</option><option value="5">5x</option><option value="10">10x</option></select></div>
         <div class="section" id="tracksSection" style="display:none;"><h2>5 · Track'ler</h2><div id="trackLegend"></div></div>
         <div class="section" id="statsSection" style="display:none;"><h2>Kümülatif RMSE (0 → mevcut kare)</h2><div class="stat"><span class="k">RMSE X (doğu)</span><span class="v axis-x" id="rmseX">–</span></div><div class="stat"><span class="k">RMSE Y (kuzey)</span><span class="v axis-y" id="rmseY">–</span></div><div class="stat"><span class="k">RMSE Z (irtifa)</span><span class="v axis-z" id="rmseZ">–</span></div><div class="stat"><span class="k">RMSE toplam</span><span class="v" id="rmseTotal">–</span></div><div class="stat"><span class="k">Eşleşen / GT / FP</span><span class="v" id="matchCounts">–</span></div></div>
         <div class="section" id="frameMatchSection" style="display:none;"><h2>Bu Karedeki Eşleşmeler</h2><div id="matchList"></div></div>
@@ -216,8 +247,17 @@ def build_threejs_html(gt_df: pd.DataFrame, fused_df: pd.DataFrame) -> str:
     let gtGroup, fusedGroup, errGroup, gridGroup, labelGroup;
     let sceneCenter = new THREE.Vector3(), sceneRadius = 100;
 
-    const Z_SCALE = 50; 
-    function toThree(p){ return new THREE.Vector3(p.x, p.z * Z_SCALE, p.y); } 
+    let verticalScale = 1;
+    let plotOrigin = {x:0, y:0, z:0};
+    // ENU -> Three.js: east=X, up=Y, north=-Z. GT and fused data share
+    // the same local origin and vertical exaggeration.
+    function toThree(p){
+      return new THREE.Vector3(
+        p.x - plotOrigin.x,
+        (p.z - plotOrigin.z) * verticalScale,
+        -(p.y - plotOrigin.y)
+      );
+    }
 
     function initScene(){
       canvasHost = document.getElementById('canvasHost');
@@ -242,13 +282,21 @@ def build_threejs_html(gt_df: pd.DataFrame, fused_df: pd.DataFrame) -> str:
 
     function buildStaticScene(){
       [gtGroup, fusedGroup, gridGroup, labelGroup, errGroup].forEach(g=>{ while(g.children.length) g.remove(g.children[0]); });
+      const rawPoints = Object.values(gtTracks).flat().concat(Object.values(fusedTracks).flat());
+      if(rawPoints.length){
+        plotOrigin = {
+          x: rawPoints.reduce((v,p)=>Math.min(v,p.x), Infinity),
+          y: rawPoints.reduce((v,p)=>Math.min(v,p.y), Infinity),
+          z: rawPoints.reduce((v,p)=>Math.min(v,p.z), Infinity)
+        };
+      }
       const box = new THREE.Box3();
       Object.values(gtTracks).forEach(arr=>arr.forEach(p=>box.expandByPoint(toThree(p)))); Object.values(fusedTracks).forEach(arr=>arr.forEach(p=>box.expandByPoint(toThree(p))));
       if(box.isEmpty()){ box.setFromCenterAndSize(new THREE.Vector3(), new THREE.Vector3(100,100,100)); }
       box.getCenter(sceneCenter); sceneRadius = Math.max(box.getSize(new THREE.Vector3()).length()/2, 10);
       const gridSize = Math.max(sceneRadius*2.4, 100); const grid = new THREE.GridHelper(gridSize, 30, 0x1c3140, 0x0a1622); grid.position.set(sceneCenter.x, box.min.y, sceneCenter.z); gridGroup.add(grid);
       const axisLen = sceneRadius*0.5, origin = new THREE.Vector3(box.min.x, box.min.y, box.min.z);
-      addAxisArrow(origin, new THREE.Vector3(1,0,0), axisLen, 0xff6b6b, 'X'); addAxisArrow(origin, new THREE.Vector3(0,0,1), axisLen, 0x5ce1a0, 'Y'); addAxisArrow(origin, new THREE.Vector3(0,1,0), axisLen, 0xffd166, 'Z');
+      addAxisArrow(origin, new THREE.Vector3(1,0,0), axisLen, 0xff6b6b, 'X'); addAxisArrow(origin, new THREE.Vector3(0,0,-1), axisLen, 0x5ce1a0, 'Y'); addAxisArrow(origin, new THREE.Vector3(0,1,0), axisLen, 0xffd166, 'Z');
       Object.entries(gtTracks).forEach(([id,arr])=>{
         const pts = arr.map(toThree); if(pts.length < 2) return; const path = new THREE.CurvePath();
         for(let i=0; i<pts.length-1; i++) path.add(new THREE.LineCurve3(pts[i], pts[i+1]));
@@ -307,7 +355,7 @@ def build_threejs_html(gt_df: pd.DataFrame, fused_df: pd.DataFrame) -> str:
       const showErr = document.getElementById('toggleErrLines').checked, showBars = document.getElementById('toggleAxisBars').checked;
       matches.forEach(m=>{
         if(showErr) errGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([m.fused.three, m.gt.three]), new THREE.LineBasicMaterial({ color: m.fused.color, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending })));
-        if(showBars){ const g = m.gt.three; addErrBar(g, new THREE.Vector3(1,0,0), m.dx, 0xff6b6b); addErrBar(g, new THREE.Vector3(0,0,1), m.dy, 0x5ce1a0); addErrBar(g, new THREE.Vector3(0,1,0), m.dz, 0xffd166); }
+        if(showBars){ const g = m.gt.three; addErrBar(g, new THREE.Vector3(1,0,0), m.dx, 0xff6b6b); addErrBar(g, new THREE.Vector3(0,0,-1), m.dy, 0x5ce1a0); addErrBar(g, new THREE.Vector3(0,1,0), m.dz*verticalScale, 0xffd166); }
       });
       document.getElementById('frameLabel').textContent = (currentFrame+1)+' / '+frameTimes.length+'  (t='+(+t.toFixed(2))+')'; updateMatchPanel(matches); updateCumulativeStats();
     }
@@ -362,6 +410,10 @@ def build_threejs_html(gt_df: pd.DataFrame, fused_df: pd.DataFrame) -> str:
 
     document.querySelectorAll('[data-view]').forEach(btn=>{ btn.addEventListener('click', ()=>{ fitCameraToScene(btn.dataset.view); document.querySelectorAll('[data-view]').forEach(b=>b.classList.remove('active')); document.querySelectorAll(`[data-view="${btn.dataset.view}"]`).forEach(b=>b.classList.add('active')); }); });
     ['toggleGtLine','toggleFusedTrail','toggleErrLines','toggleAxisBars','toggleGrid'].forEach(id=>{ document.getElementById(id).addEventListener('change', ()=>{ if(id==='toggleGrid'){ gridGroup.visible = document.getElementById(id).checked; } if(sceneReady) updateFrame(); }); });
+    document.getElementById('verticalScale').addEventListener('change', e=>{
+      verticalScale = Number(e.target.value) || 1;
+      if(sceneReady){ buildStaticScene(); updateFrame(); }
+    });
 
     function updateFrameLabel(t){ document.getElementById('frameLabel').textContent = (currentFrame+1)+' / '+frameTimes.length+'  (t='+(+t.toFixed(2))+')'; }
 
@@ -928,6 +980,604 @@ def run_live_fusion_simulation(sensor_csv_path: str, gt_df_for_map: Optional[pd.
     st.session_state["live_gt_df"] = gt_df_for_map
 
 # ===========================================================================
+# HEDEF 5 – AKINCI 3B ANALIZI
+# ===========================================================================
+def render_target5_analysis_page():
+    st.header("Hedef 5 – Spiral Tırmanış Analizi")
+    st.caption(
+        "Platform-temsili sentetik profil; gerçek operasyonel uçuş kaydı değildir. "
+        "Senaryo mevcut radar modellerini ve IMM füzyonunu kullanır."
+    )
+
+    with st.form("target5_scenario_form"):
+        first, second, third = st.columns(3)
+        with first:
+            total_speed = st.number_input("Toplam hız (m/s)", 40.0, 120.0, 77.0, 1.0)
+            radius_start = st.number_input("Başlangıç yarıçapı (m)", 100.0, 3000.0, 500.0, 50.0)
+            radius_end = st.number_input("Bitiş yarıçapı (m)", 200.0, 5000.0, 1800.0, 50.0)
+            start_altitude = st.number_input("Başlangıç lokal Z (m)", -5000.0, 10000.0, 3000.0, 100.0)
+            climb_rate = st.number_input("Tırmanış oranı (m/s)", 0.1, 20.0, 5.0, 0.5)
+        with second:
+            turn_count = st.number_input("Tur sayısı", 1, 10, 4, 1)
+            turn_direction = st.selectbox("Dönüş yönü", ["ccw", "cw"], index=0)
+            st.caption("Süre, gerçek 3B yay uzunluğu / toplam hız ile otomatik hesaplanır.")
+        with third:
+            center_x = st.number_input("Spiral merkez X (m)", -400000.0, 400000.0, 100000.0, 1000.0)
+            center_y = st.number_input("Spiral merkez Y (m)", -400000.0, 400000.0, 100000.0, 1000.0)
+            sample_rate = st.number_input("GT örnekleme (Hz)", 1.0, 50.0, 20.0, 1.0)
+            noise_scale = st.number_input("Sensör gürültü çarpanı", 0.25, 3.0, 1.0, 0.05)
+            detection_probability = st.slider("Temel detection probability", 0.10, 1.0, 0.90, 0.01)
+            seed = st.number_input("Random seed", 0, 1000000, 42, 1)
+        submitted = st.form_submit_button("Hedef 5 senaryosunu üret ve IMM füzyonunu çalıştır", type="primary")
+
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    gt_path = os.path.join(project_dir, "ground_truth_adsb_multi_target5.csv")
+    sensor_path = os.path.join(project_dir, "radar_sensor_tracks_gercekci_target5.csv")
+    fused_path = os.path.join(project_dir, "res_target5_imm.csv")
+    debug_path = os.path.join(project_dir, "target5_imm_association_debug.csv")
+
+    if submitted:
+        params = Target5Parameters(
+            sample_rate_hz=float(sample_rate),
+            total_speed_mps=float(total_speed),
+            turn_count=int(turn_count),
+            radius_start_m=float(radius_start),
+            radius_end_m=float(radius_end),
+            climb_rate_mps=float(climb_rate),
+            center_x_m=float(center_x),
+            center_y_m=float(center_y),
+            start_altitude_m=float(start_altitude),
+            turn_direction=turn_direction,
+        )
+        try:
+            with st.spinner("Ground truth ve radar ölçümleri üretiliyor..."):
+                paths = write_target5_scenario(
+                    project_dir,
+                    params,
+                    seed=int(seed),
+                    noise_scale=float(noise_scale),
+                    detection_probability=float(detection_probability),
+                )
+            with st.spinner("IMM füzyonu çalıştırılıyor..."):
+                run_imm_fusion(
+                    sensor_csv=str(paths["sensor"]),
+                    output_csv=fused_path,
+                    verbose=False,
+                    diagnostics_csv=debug_path,
+                )
+            load_ground_truth.clear()
+            load_sensor_data.clear()
+            load_fused_data.clear()
+            st.success("Hedef 5 senaryosu ve IMM çıktısı oluşturuldu.")
+        except Exception as exc:
+            st.error(f"Hedef 5 senaryosu üretilemedi: {exc}")
+            return
+
+    if not all(os.path.exists(path) for path in (gt_path, sensor_path, fused_path)):
+        st.info("Analizi görmek için formu göndererek Hedef 5 senaryosunu üretin.")
+        return
+
+    gt_all = load_ground_truth(gt_path)
+    sensor_all = load_sensor_data(sensor_path)
+    fused_all = load_fused_data(fused_path)
+    target5_gt = gt_all[gt_all["callsign"].astype(str) == TARGET5_CALLSIGN].copy()
+    target5_sensor = sensor_all[
+        sensor_all["callsign_true"].astype(str) == TARGET5_CALLSIGN
+    ].copy()
+    other_sensor = sensor_all[
+        (sensor_all["callsign_true"].astype(str) != TARGET5_CALLSIGN)
+        & (sensor_all["time"] >= float(target5_gt["time"].min()))
+        & (sensor_all["time"] <= float(target5_gt["time"].max()))
+    ].copy()
+    target5_tracks, track_summary = associate_fused_tracks_to_target5(
+        target5_gt, fused_all, max_match_distance_m=400.0, max_allowed_gap_s=5.0
+    )
+    matched = match_fused_to_target5(target5_gt, fused_all, max_match_distance_m=400.0)
+    main_track_id = (
+        str(track_summary.iloc[0]["track_id"]) if not track_summary.empty else None
+    )
+    track_view = st.radio(
+        "Fused track görünümü",
+        ["Ana track", "Tüm Hedef 5 track parçaları"],
+        horizontal=True,
+    )
+    vertical_exaggeration = st.select_slider(
+        "3B dikey ölçek",
+        options=[1.0, 2.0, 5.0, 10.0],
+        value=5.0,
+        format_func=lambda value: f"{value}x" + (" (gerçek ölçek)" if value == 1 else ""),
+    )
+    if track_view == "Ana track" and main_track_id is not None:
+        displayed_tracks = target5_tracks[
+            target5_tracks["global_track_id"].astype(str) == main_track_id
+        ].copy()
+    else:
+        displayed_tracks = target5_tracks.copy()
+    evaluation_times = sensor_all["time"].dropna().unique().tolist()
+    metrics = compute_target_specific_metrics(
+        gt_all,
+        fused_all,
+        TARGET5_CALLSIGN,
+        max_match_distance=400.0,
+        evaluation_times=evaluation_times,
+    )
+    if matched.empty:
+        target5_id_switches = 0
+        target5_id_precision = 0.0
+    else:
+        assigned_ids = matched["global_track_id"].astype(str)
+        target5_id_switches = int((assigned_ids != assigned_ids.shift()).iloc[1:].sum())
+        identity_consistent_tp = max(int(metrics.get("total_tp", 0)) - target5_id_switches, 0)
+        denominator = identity_consistent_tp + int(metrics.get("total_fp", 0)) + target5_id_switches
+        target5_id_precision = identity_consistent_tp / denominator if denominator else 0.0
+    target5_id_f1 = (
+        2.0 * target5_id_precision * metrics.get("recall", 0.0)
+        / (target5_id_precision + metrics.get("recall", 0.0))
+        if target5_id_precision + metrics.get("recall", 0.0) > 0.0
+        else 0.0
+    )
+    metrics["id_switches"] = target5_id_switches
+    metrics["id_precision"] = target5_id_precision
+    metrics["id_f1"] = target5_id_f1
+    separations = target_separations(
+        target5_gt,
+        gt_all[gt_all["callsign"].astype(str) != TARGET5_CALLSIGN],
+    )
+
+    tab_2d, tab_3d, tab_results = st.tabs(
+        ["2B Rota", "3B Rota", "Füzyon Sonuçları"]
+    )
+    # Önceki füzyon teşhisi korunur, ancak ayrı dördüncü sekme yerine sonuç
+    # panelinin altında gösterilir.
+    tab_diagnostics = tab_results
+
+    diagnostic_measurements = pd.DataFrame()
+    diagnostic_deletions = pd.DataFrame()
+    if os.path.exists(debug_path):
+        diagnostic_all = pd.read_csv(debug_path)
+        diagnostic_measurements = diagnostic_all[
+            (diagnostic_all.get("label", "").astype(str) == TARGET5_CALLSIGN)
+            & (diagnostic_all.get("event_type", "") == "measurement")
+        ].copy()
+        diagnostic_deletions = diagnostic_all[
+            (diagnostic_all.get("label", "").astype(str) == TARGET5_CALLSIGN)
+            & (diagnostic_all.get("event_type", "") == "track_deleted")
+        ].copy()
+
+    prediction_count = int(
+        target5_tracks.get(
+            "is_prediction_only", pd.Series(False, index=target5_tracks.index)
+        ).fillna(False).astype(bool).sum()
+    )
+    xy_gate_rejections = int(
+        diagnostic_measurements.get(
+            "source_xy_rejected", pd.Series(False, index=diagnostic_measurements.index)
+        ).fillna(False).astype(bool).sum()
+    )
+    z_gate_rejections = int(
+        diagnostic_measurements.get(
+            "source_z_rejected", pd.Series(False, index=diagnostic_measurements.index)
+        ).fillna(False).astype(bool).sum()
+    )
+    new_track_count = int(
+        diagnostic_measurements.get(
+            "created", pd.Series(False, index=diagnostic_measurements.index)
+        ).fillna(False).astype(bool).sum()
+    )
+    accepted_associations = int(
+        diagnostic_measurements.get(
+            "accepted_stage", pd.Series(dtype=str)
+        ).isin(["source_map", "hungarian", "revive"]).sum()
+    )
+    association_rejections = max(len(diagnostic_measurements) - accepted_associations, 0)
+    gating_rejections = int(
+        (
+            diagnostic_measurements.get(
+                "source_xy_rejected", pd.Series(False, index=diagnostic_measurements.index)
+            ).fillna(False).astype(bool)
+            | diagnostic_measurements.get(
+                "source_z_rejected", pd.Series(False, index=diagnostic_measurements.index)
+            ).fillna(False).astype(bool)
+        ).sum()
+    )
+    longest_gap = float(track_summary["max_time_gap_s"].max()) if not track_summary.empty else 0.0
+    time_match_rejections = int(track_summary["time_match_rejected"].sum()) if not track_summary.empty else 0
+    diag_columns = tab_diagnostics.columns(5)
+    for index, (label, value) in enumerate((
+        ("GT nokta", len(target5_gt)),
+        ("Radar ölçümü", len(target5_sensor)),
+        ("İlişkili fused state", len(target5_tracks)),
+        ("Prediction-only", prediction_count),
+        ("Global ID", len(track_summary)),
+        ("Ana track", main_track_id or "N/A"),
+        ("ID switch", target5_id_switches),
+        ("Kabul edilen association", accepted_associations),
+        ("Association reddi", association_rejections),
+        ("Gate reddi (tekil)", gating_rejections),
+        ("Source-map XY ret", xy_gate_rejections),
+        ("Source-map Z ret", z_gate_rejections),
+        ("Yeni track", new_track_count),
+        ("Track silinmesi", len(diagnostic_deletions)),
+        ("En uzun fused boşluk", f"{longest_gap:.2f} s"),
+        ("Zaman toleransı reddi", time_match_rejections),
+    )):
+        diag_columns[index % 5].metric(label, value)
+
+    tab_diagnostics.caption(
+        "Gate sayaçları aynı radar CSV'sinin, mevcut IMM eşikleri değiştirilmeden yapılan "
+        "tanısal tekrar çalıştırmasından gelir. XY ve Z sayaçları source-map continuity "
+        "denemesindeki gerçek Mahalanobis retleridir."
+    )
+    if not track_summary.empty:
+        display_summary = track_summary.rename(columns={
+            "track_id": "Global ID",
+            "start_time": "Başlangıç (s)",
+            "end_time": "Bitiş (s)",
+            "point_count": "Nokta",
+            "duration": "Süre (s)",
+            "mean_3d_error": "Ort. 3B hata (m)",
+            "max_3d_error": "Maks. 3B hata (m)",
+            "prediction_only_count": "Prediction-only",
+            "time_match_rejected": "Zaman toleransı reddi",
+            "max_time_gap_s": "Maks. boşluk (s)",
+        })
+        tab_diagnostics.subheader("Hedef 5 track parçalanması")
+        tab_diagnostics.dataframe(display_summary, use_container_width=True, hide_index=True)
+
+    range_frames = [frame for frame in (target5_gt, target5_sensor, target5_tracks) if not frame.empty]
+    if range_frames:
+        range_data = pd.concat([frame[["x", "y", "z"]] for frame in range_frames], ignore_index=True)
+        tab_diagnostics.dataframe(pd.DataFrame({
+            "Eksen": ["X", "Y", "Z"],
+            "Minimum (m)": [range_data[axis].min() for axis in ("x", "y", "z")],
+            "Maksimum (m)": [range_data[axis].max() for axis in ("x", "y", "z")],
+            "Aralık (m)": [range_data[axis].max() - range_data[axis].min() for axis in ("x", "y", "z")],
+        }), use_container_width=True, hide_index=True)
+
+    if not matched.empty:
+        switch_mask = matched["global_track_id"].astype(str).ne(
+            matched["global_track_id"].astype(str).shift()
+        )
+        switch_table = matched.loc[switch_mask, ["time", "global_track_id"]].copy()
+        switch_table["Önceki ID"] = switch_table["global_track_id"].shift()
+        tab_diagnostics.subheader("ID geçiş zamanları")
+        tab_diagnostics.dataframe(switch_table.iloc[1:], use_container_width=True, hide_index=True)
+
+    if diagnostic_measurements.empty:
+        tab_diagnostics.warning(
+            "Gate tanı CSV'si bulunamadı. Hedef 5 senaryosunu yeniden üretince tanı dosyası da oluşur."
+        )
+    else:
+        tab_diagnostics.subheader("Association aşaması")
+        stage_counts = diagnostic_measurements["accepted_stage"].fillna("rejected").value_counts()
+        tab_diagnostics.dataframe(
+            stage_counts.rename_axis("Aşama").reset_index(name="Ölçüm sayısı"),
+            use_container_width=True,
+            hide_index=True,
+        )
+        gate_rows = diagnostic_measurements[
+            diagnostic_measurements.get(
+                "source_xy_rejected", pd.Series(False, index=diagnostic_measurements.index)
+            ).fillna(False).astype(bool)
+            | diagnostic_measurements.get(
+                "source_z_rejected", pd.Series(False, index=diagnostic_measurements.index)
+            ).fillna(False).astype(bool)
+        ]
+        if not gate_rows.empty:
+            tab_diagnostics.subheader("Gate dışına çıkan source-map denemeleri")
+            tab_diagnostics.dataframe(
+                gate_rows[[
+                    "time", "sensor", "local_track_id", "source_map_track_id",
+                    "source_d2_xy", "source_gate_xy", "source_d2_z", "source_gate_z",
+                ]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    if not matched.empty and "dominant_model" in matched:
+        tab_diagnostics.subheader("Hedef 5 üzerinde etkin IMM modelleri")
+        tab_diagnostics.dataframe(
+            matched["dominant_model"].value_counts().rename_axis("Dominant model")
+            .reset_index(name="Fused state"),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    one_second_edges = np.arange(
+        float(target5_gt["time"].min()), float(target5_gt["time"].max()) + 1.01, 1.0
+    )
+    no_sensor_intervals = int(
+        (np.histogram(target5_sensor["time"], bins=one_second_edges)[0] == 0).sum()
+    ) if len(one_second_edges) > 1 else 0
+    tab_diagnostics.subheader("Eksik görünen fused bölümlerin ayrımı")
+    tab_diagnostics.dataframe(pd.DataFrame({
+        "Neden": [
+            "Sensör ölçümü olmayan 1 s aralık",
+            "Yalnızca prediction olan state",
+            "Track silinmesi",
+            "Association başarısız / yeni track açıldı",
+            "Ana-track görünüm filtresinde gizlenen state",
+        ],
+        "Sayı": [
+            no_sensor_intervals,
+            prediction_count,
+            len(diagnostic_deletions),
+            association_rejections,
+            max(len(target5_tracks) - len(displayed_tracks), 0),
+        ],
+    }), use_container_width=True, hide_index=True)
+    fig_xy = go.Figure()
+    fig_xy.add_trace(go.Scatter(
+        x=target5_gt["x"], y=target5_gt["y"], mode="lines",
+        name="Hedef 5 Ground Truth", line=dict(color="#00CC96", width=4),
+    ))
+    for sensor_name, group in target5_sensor.groupby("sensor"):
+        fig_xy.add_trace(go.Scatter(
+            x=group["x"], y=group["y"], mode="markers",
+            marker=dict(size=5, opacity=0.5), name=f"Radar: {sensor_name}",
+        ))
+    for (track_id, segment_id), segment in displayed_tracks.groupby(
+        ["global_track_id", "segment_id"], sort=False
+    ):
+        segment = segment.sort_values("time")
+        fig_xy.add_trace(go.Scatter(
+            x=segment["x"], y=segment["y"], mode="lines+markers",
+            name=f"IMM {track_id} / parça {segment_id}",
+            line=dict(width=3), marker=dict(size=4),
+        ))
+    fig_xy.add_trace(go.Scatter(
+        x=[target5_gt.iloc[0]["x"], target5_gt.iloc[-1]["x"]],
+        y=[target5_gt.iloc[0]["y"], target5_gt.iloc[-1]["y"]],
+        mode="markers+text", text=["Başlangıç", "Bitiş"],
+        textposition="top center", marker=dict(size=11), name="Başlangıç/Bitiş",
+    ))
+    fig_xy.update_layout(title="X-Y üstten görünüm", xaxis_title="X (m)", yaxis_title="Y (m)", height=600)
+    fig_xy.update_yaxes(scaleanchor="x", scaleratio=1)
+    tab_2d.plotly_chart(fig_xy, use_container_width=True)
+
+    fig_xz = go.Figure()
+    fig_xz.add_trace(go.Scatter(x=target5_gt["x"], y=target5_gt["z"], mode="lines", name="Ground Truth"))
+    for (track_id, segment_id), segment in displayed_tracks.groupby(
+        ["global_track_id", "segment_id"], sort=False
+    ):
+        segment = segment.sort_values("time")
+        fig_xz.add_trace(go.Scatter(
+            x=segment["x"], y=segment["z"], mode="lines+markers",
+            name=f"IMM {track_id} / parça {segment_id}",
+        ))
+    for sensor_name, group in target5_sensor.groupby("sensor"):
+        fig_xz.add_trace(go.Scatter(x=group["x"], y=group["z"], mode="markers", name=f"Radar: {sensor_name}", marker=dict(size=4, opacity=0.45)))
+    fig_xz.update_layout(title="X-Z yandan görünüm", xaxis_title="X (m)", yaxis_title="İrtifa / lokal Z (m)", height=500)
+    tab_2d.plotly_chart(fig_xz, use_container_width=True)
+
+    fig_time_altitude = go.Figure()
+    fig_time_altitude.add_trace(go.Scatter(
+        x=target5_gt["time"], y=target5_gt["z"], mode="lines",
+        name="Ground Truth irtifa",
+    ))
+    for (track_id, segment_id), segment in displayed_tracks.groupby(
+        ["global_track_id", "segment_id"], sort=False
+    ):
+        segment = segment.sort_values("time")
+        fig_time_altitude.add_trace(go.Scatter(
+            x=segment["time"], y=segment["z"], mode="lines",
+            name=f"IMM {track_id} / parça {segment_id}",
+        ))
+    fig_time_altitude.update_layout(
+        title="Zaman–irtifa görünümü", xaxis_title="Zaman (s)", yaxis_title="Lokal Z (m)", height=450
+    )
+    tab_2d.plotly_chart(fig_time_altitude, use_container_width=True)
+
+    origin_z = float(target5_gt.iloc[0]["z"])
+
+    def z_display(values):
+        values = pd.to_numeric(values, errors="coerce")
+        return origin_z + (values - origin_z) * vertical_exaggeration
+
+    fig3d = go.Figure()
+    fig3d.add_trace(go.Scatter3d(
+        x=target5_gt["x"], y=target5_gt["y"], z=z_display(target5_gt["z"]),
+        mode="lines", name="Hedef 5 Ground Truth",
+        line=dict(color="#00CC96", width=6),
+        customdata=target5_gt[["time", "speed", "heading", "z"]],
+        hovertemplate="GT<br>t=%{customdata[0]:.2f}s<br>x=%{x:.1f}<br>y=%{y:.1f}<br>gerçek z=%{customdata[3]:.1f}<br>hız=%{customdata[1]:.1f}<br>heading=%{customdata[2]:.1f}°<extra></extra>",
+    ))
+    for sensor_name, group in target5_sensor.groupby("sensor"):
+        fig3d.add_trace(go.Scatter3d(
+            x=group["x"], y=group["y"], z=z_display(group["z"]), mode="markers",
+            marker=dict(size=3, opacity=0.55), name=f"Radar: {sensor_name}",
+            customdata=group[["time", "local_track_id", "z"]],
+            hovertemplate="%{customdata[1]}<br>t=%{customdata[0]:.2f}s<br>x=%{x:.1f}<br>y=%{y:.1f}<br>gerçek z=%{customdata[2]:.1f}<extra></extra>",
+        ))
+    for sensor_name, group in other_sensor.groupby("sensor"):
+        fig3d.add_trace(go.Scatter3d(
+            x=group["x"], y=group["y"], z=z_display(group["z"]), mode="markers",
+            marker=dict(size=2, opacity=0.15),
+            name=f"Diğer hedef ölçümleri: {sensor_name}",
+            visible="legendonly",
+        ))
+    for (track_id, segment_id), segment in displayed_tracks.groupby(
+        ["global_track_id", "segment_id"], sort=False
+    ):
+        segment = segment.sort_values("time")
+        fig3d.add_trace(go.Scatter3d(
+            x=segment["x"], y=segment["y"], z=z_display(segment["z"]), mode="lines",
+            line=dict(width=5), name=f"IMM {track_id} / parça {segment_id}",
+            customdata=segment[["time", "global_track_id", "estimated_speed", "z"]],
+            hovertemplate="Fused %{customdata[1]}<br>t=%{customdata[0]:.2f}s<br>x=%{x:.1f}<br>y=%{y:.1f}<br>gerçek z=%{customdata[3]:.1f}<br>hız=%{customdata[2]:.1f}<extra></extra>",
+        ))
+        prediction_mask = segment.get(
+            "is_prediction_only", pd.Series(False, index=segment.index)
+        ).fillna(False).astype(bool)
+        for mask, label, symbol in (
+            (~prediction_mask, "ölçüm güncellemesi", "circle"),
+            (prediction_mask, "prediction-only", "diamond"),
+        ):
+            points = segment[mask]
+            if not points.empty:
+                fig3d.add_trace(go.Scatter3d(
+                    x=points["x"], y=points["y"], z=z_display(points["z"]), mode="markers",
+                    marker=dict(size=3, symbol=symbol),
+                    name=f"{track_id} {label}", showlegend=True,
+                ))
+    fig3d.add_trace(go.Scatter3d(
+        x=[target5_gt.iloc[0]["x"], target5_gt.iloc[-1]["x"]],
+        y=[target5_gt.iloc[0]["y"], target5_gt.iloc[-1]["y"]],
+        z=z_display(pd.Series([target5_gt.iloc[0]["z"], target5_gt.iloc[-1]["z"]])),
+        mode="markers+text", text=["Başlangıç", "Bitiş"], textposition="top center",
+        marker=dict(size=7, color=["#AB63FA", "#FFA15A"]), name="Başlangıç/Bitiş",
+    ))
+    fig3d.update_layout(
+        height=720,
+        scene=dict(xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="İrtifa / lokal Z (m)", aspectmode="data"),
+        legend=dict(orientation="h"), margin=dict(l=0, r=0, b=0, t=40),
+    )
+    tab_3d.plotly_chart(fig3d, use_container_width=True)
+
+    tab_results.subheader("Hedef 5 sonuçları")
+    route_segments = np.diff(target5_gt[["x", "y", "z"]].to_numpy(float), axis=0)
+    route_length_m = float(np.linalg.norm(route_segments, axis=1).sum())
+    duration_actual_s = float(target5_gt["time"].iloc[-1] - target5_gt["time"].iloc[0])
+    center_x_actual = float(target5_gt.get(
+        "spiral_center_x_m", pd.Series([target5_gt["x"].mean()])
+    ).iloc[0])
+    center_y_actual = float(target5_gt.get(
+        "spiral_center_y_m", pd.Series([target5_gt["y"].mean()])
+    ).iloc[0])
+    radii = np.hypot(
+        target5_gt["x"].to_numpy(float) - center_x_actual,
+        target5_gt["y"].to_numpy(float) - center_y_actual,
+    )
+    spiral_summary = pd.DataFrame({
+        "Spiral özelliği": [
+            "Tur sayısı", "Merkez X", "Merkez Y", "Başlangıç yarıçapı",
+            "Bitiş yarıçapı", "Hesaplanan süre", "Toplam 3B rota uzunluğu",
+            "Başlangıç irtifası", "Bitiş irtifası", "Toplam irtifa kazancı",
+            "Ortalama hız", "Minimum hız", "Maksimum hız", "Dikey görsel ölçek",
+            "Fused track sayısı", "Ana fused track ID",
+        ],
+        "Değer": [
+            str(int(round(float(target5_gt.get("spiral_theta_rad", pd.Series([8.0 * np.pi])).iloc[-1]) / (2.0 * np.pi)))),
+            f"{center_x_actual:.2f} m", f"{center_y_actual:.2f} m",
+            f"{radii[0]:.2f} m", f"{radii[-1]:.2f} m",
+            f"{duration_actual_s:.3f} s", f"{route_length_m:.2f} m",
+            f"{target5_gt['z'].iloc[0]:.2f} m", f"{target5_gt['z'].iloc[-1]:.2f} m",
+            f"{target5_gt['z'].iloc[-1] - target5_gt['z'].iloc[0]:.2f} m",
+            f"{target5_gt['speed'].mean():.3f} m/s",
+            f"{target5_gt['speed'].min():.3f} m/s",
+            f"{target5_gt['speed'].max():.3f} m/s",
+            f"{vertical_exaggeration:.1f}x", str(len(track_summary)), main_track_id or "N/A",
+        ],
+    })
+    tab_results.dataframe(spiral_summary, use_container_width=True, hide_index=True)
+    metric_columns = tab_results.columns(5)
+    headline = [
+        ("Position RMSE", metrics.get("rmse_pos_m"), "m"),
+        ("Velocity RMSE", metrics.get("rmse_vel_mps"), "m/s"),
+        ("Precision", metrics.get("precision"), ""),
+        ("Recall", metrics.get("recall"), ""),
+        ("F1", metrics.get("f1_score"), ""),
+        ("ID Precision", metrics.get("id_precision"), ""),
+        ("ID F1", metrics.get("id_f1"), ""),
+        ("MOTA", metrics.get("mota"), ""),
+        ("ID switches", metrics.get("id_switches"), ""),
+        ("Ortalama NEES", metrics.get("nees"), ""),
+    ]
+    for index, (label, value, suffix) in enumerate(headline):
+        display = "N/A" if value is None or pd.isna(value) else f"{value:.3f}{' ' + suffix if suffix else ''}"
+        metric_columns[index % 5].metric(label, display)
+
+    axis_table = pd.DataFrame({
+        "Metrik": ["X RMSE", "Y RMSE", "Z RMSE", "VX RMSE", "VY RMSE", "VZ RMSE"],
+        "Değer": [metrics.get(key) for key in ("rmse_x_m", "rmse_y_m", "rmse_z_m", "rmse_vx_mps", "rmse_vy_mps", "rmse_vz_mps")],
+        "Birim": ["m", "m", "m", "m/s", "m/s", "m/s"],
+    })
+    summary_left, summary_right = tab_results.columns(2)
+    summary_left.dataframe(axis_table, use_container_width=True, hide_index=True)
+    if matched.empty:
+        error_summary = pd.DataFrame({"Metrik": ["Eşleşmiş fused nokta"], "Değer": [0]})
+    else:
+        errors = matched["position_error_3d"]
+        error_summary = pd.DataFrame({
+            "Metrik": ["Minimum 3B hata", "Ortalama 3B hata", "Maksimum 3B hata", "Track ID'leri", "Diğer hedeflere minimum ayrım"],
+            "Değer": [
+                f"{errors.min():.2f} m", f"{errors.mean():.2f} m", f"{errors.max():.2f} m",
+                ", ".join(sorted(matched["global_track_id"].unique())),
+                f"{min(separations.values()):.2f} m" if separations else "N/A",
+            ],
+        })
+    summary_right.dataframe(error_summary, use_container_width=True, hide_index=True)
+    if separations:
+        tab_results.dataframe(
+            pd.DataFrame([{"Hedef": target, "Minimum 3B ayrım (m)": distance} for target, distance in separations.items()]),
+            use_container_width=True, hide_index=True,
+        )
+
+    if matched.empty:
+        tab_results.warning("400 m değerlendirme kapısı içinde Hedef 5 ile eşleşen fused track bulunamadı.")
+        return
+
+    tab_results.subheader("Zamana bağlı hata ve durum grafikleri")
+    chart1, chart2 = tab_results.columns(2)
+    error_3d = go.Figure(go.Scatter(x=matched["time"], y=matched["position_error_3d"], name="3B pozisyon hatası"))
+    error_3d.update_layout(xaxis_title="Zaman (s)", yaxis_title="Hata (m)")
+    chart1.plotly_chart(error_3d, use_container_width=True)
+    axis_error = go.Figure()
+    for axis in ("x", "y", "z"):
+        axis_error.add_trace(go.Scatter(x=matched["time"], y=matched[f"error_{axis}"], name=axis.upper()))
+    axis_error.update_layout(xaxis_title="Zaman (s)", yaxis_title="Eksen hatası (m)")
+    chart2.plotly_chart(axis_error, use_container_width=True)
+
+    chart3, chart4 = tab_results.columns(2)
+    velocity_error = go.Figure(go.Scatter(x=matched["time"], y=matched["velocity_error_3d"], name="Hız hatası"))
+    velocity_error.update_layout(xaxis_title="Zaman (s)", yaxis_title="Hız hatası (m/s)")
+    chart3.plotly_chart(velocity_error, use_container_width=True)
+    altitude = go.Figure()
+    altitude.add_trace(go.Scatter(x=matched["time"], y=matched["gt_z"], name="GT Z"))
+    altitude.add_trace(go.Scatter(x=matched["time"], y=matched["z"], name="Fused Z"))
+    altitude.update_layout(xaxis_title="Zaman (s)", yaxis_title="Lokal Z (m)")
+    chart4.plotly_chart(altitude, use_container_width=True)
+
+    chart5, chart6 = tab_results.columns(2)
+    speed_fig = go.Figure()
+    speed_fig.add_trace(go.Scatter(x=matched["time"], y=matched["gt_speed"], name="GT hız"))
+    speed_fig.add_trace(go.Scatter(x=matched["time"], y=matched["estimated_speed"], name="Fused hız"))
+    speed_fig.update_layout(xaxis_title="Zaman (s)", yaxis_title="Hız (m/s)")
+    chart5.plotly_chart(speed_fig, use_container_width=True)
+    heading_fig = go.Figure()
+    heading_fig.add_trace(go.Scatter(x=matched["time"], y=matched["gt_heading"], name="GT heading"))
+    heading_fig.add_trace(go.Scatter(x=matched["time"], y=matched["estimated_heading"], name="Fused heading"))
+    heading_fig.update_layout(xaxis_title="Zaman (s)", yaxis_title="Heading (°)")
+    chart6.plotly_chart(heading_fig, use_container_width=True)
+
+    probability_columns = [column for column in matched if column.startswith("mode_prob_")]
+    if probability_columns:
+        probability_fig = go.Figure()
+        for column in probability_columns:
+            probability_fig.add_trace(go.Scatter(x=matched["time"], y=matched[column], name=column.replace("mode_prob_", "")))
+        probability_fig.update_layout(title="IMM model olasılıkları", xaxis_title="Zaman (s)", yaxis_title="Olasılık")
+        tab_results.plotly_chart(probability_fig, use_container_width=True)
+
+    sigma_columns = [column for column in ("sigma_x_m", "sigma_y_m", "sigma_z_m") if column in matched]
+    if sigma_columns:
+        covariance_fig = go.Figure()
+        for column in sigma_columns:
+            covariance_fig.add_trace(go.Scatter(x=matched["time"], y=matched[column], name=column))
+        covariance_fig.update_layout(title="Filtre 1σ konum belirsizliği", xaxis_title="Zaman (s)", yaxis_title="Sigma (m)")
+        tab_results.plotly_chart(covariance_fig, use_container_width=True)
+
+    status_left, status_right = tab_results.columns(2)
+    one_second_bins = np.arange(0.0, float(target5_gt["time"].max()) + 1.0, 1.0)
+    detected_bins = np.histogram(target5_sensor["time"], bins=one_second_bins)[0] > 0
+    detection_fig = go.Figure(go.Scatter(x=one_second_bins[:-1], y=detected_bins.astype(int), mode="lines", name="Ölçüm var"))
+    detection_fig.update_layout(title="Ölçüm alınan/alınmayan aralıklar", xaxis_title="Zaman (s)", yaxis=dict(tickvals=[0, 1], ticktext=["Yok", "Var"]))
+    status_left.plotly_chart(detection_fig, use_container_width=True)
+    id_fig = go.Figure(go.Scatter(x=matched["time"], y=matched["global_track_id"], mode="markers", name="Track ID"))
+    id_fig.update_layout(title="Track ID zaman çizelgesi", xaxis_title="Zaman (s)", yaxis_title="Global track ID")
+    status_right.plotly_chart(id_fig, use_container_width=True)
+
+
+# ===========================================================================
 # ANA UYGULAMA
 # ===========================================================================
 def main():
@@ -936,7 +1586,11 @@ def main():
 
     mode = st.sidebar.radio(
         "Çalışma Modu",
-        ["Offline (Kayıtlı Fused Veri)", "Otonom Playback Animasyon"],
+        [
+            "Offline (Kayıtlı Fused Veri)",
+            "Hedef 5 – Spiral Tırmanış Analizi",
+            "Otonom Playback Animasyon",
+        ],
         index=0,
     )
 
@@ -997,6 +1651,9 @@ def main():
         gt_3d = gt_df[(gt_df["time"] >= selected_time[0]) & (gt_df["time"] <= selected_time[1])].copy()
         fused_3d = fused_df[(fused_df["time"] >= selected_time[0]) & (fused_df["time"] <= selected_time[1])].copy()
         components.html(build_threejs_html(gt_3d, fused_3d), height=850, scrolling=False)
+
+    elif mode == "Hedef 5 – Spiral Tırmanış Analizi":
+        render_target5_analysis_page()
 
     else:
         st.markdown(

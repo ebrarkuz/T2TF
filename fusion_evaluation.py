@@ -24,7 +24,7 @@ def interpolate_gt_state(sub, t):
     }
 
 
-def frame_matches(fused_frame, gt_states, max_distance=00.0):
+def frame_matches(fused_frame, gt_states, max_distance=0.0):
     if fused_frame.empty or len(gt_states) == 0:
         return [], list(range(len(fused_frame))), list(range(len(gt_states)))
 
@@ -52,27 +52,50 @@ def frame_matches(fused_frame, gt_states, max_distance=00.0):
     return matches, unmatched_fused, unmatched_gt
 
 
-def compute_tracking_metrics(gt_df, fused_df, max_match_distance=200.0):
+def compute_tracking_metrics(
+    gt_df,
+    fused_df,
+    max_match_distance=500.0,
+    evaluation_times=None,
+):
+    """Compute metrics on fused timestamps or on an explicit sensor timeline.
+
+    Supplying ``evaluation_times`` prevents a sparse algorithm from improving
+    its recall simply by omitting timestamps at which it produced no track.
+    """
     if fused_df.empty:
+        if evaluation_times is not None:
+            total_gt = 0
+            gt_key = "callsign" if "callsign" in gt_df.columns else "target"
+            for t in sorted(set(evaluation_times)):
+                total_gt += sum(
+                    interpolate_gt_state(sub.sort_values("time"), t) is not None
+                    for _, sub in gt_df.groupby(gt_key)
+                )
+        else:
+            total_gt = 0
         return {
             "precision": 0.0,
+            "id_precision": 0.0,
             "recall": 0.0,
             "f1_score": 0.0,
+            "id_f1": 0.0,
             "mota": 0.0,
             "id_switches": 0,
             "total_tp": 0,
+            "total_tp_id": 0,
             "total_fp": 0,
-            "total_fn": 0,
-            "total_gt": 0,
-            "rmse_pos_m": 0.0,
-            "rmse_x_m": 0.0,
-            "rmse_y_m": 0.0,
-            "rmse_z_m": 0.0,
-            "rmse_vel_mps": 0.0,
-            "rmse_vx_mps": 0.0,
-            "rmse_vy_mps": 0.0,
-            "rmse_vz_mps": 0.0,
-            "nees": 0.0,
+            "total_fn": total_gt,
+            "total_gt": total_gt,
+            "rmse_pos_m": np.nan,
+            "rmse_x_m": np.nan,
+            "rmse_y_m": np.nan,
+            "rmse_z_m": np.nan,
+            "rmse_vel_mps": np.nan,
+            "rmse_vx_mps": np.nan,
+            "rmse_vy_mps": np.nan,
+            "rmse_vz_mps": np.nan,
+            "nees": np.nan,
             "nees_ideal": 6.0,
         }
 
@@ -84,9 +107,19 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=200.0):
     id_switches = 0
     prev_assign = {}
     matched_rows = []
+    fused_frames = {
+        t: frame.reset_index(drop=True)
+        for t, frame in fused_df.groupby("time", sort=False)
+    }
+    empty_frame = fused_df.iloc[0:0].copy()
 
-    for t in sorted(fused_df["time"].unique()):
-        fused_frame = fused_df[fused_df["time"] == t].reset_index(drop=True)
+    timeline = (
+        sorted(set(evaluation_times))
+        if evaluation_times is not None
+        else sorted(fused_df["time"].unique())
+    )
+    for t in timeline:
+        fused_frame = fused_frames.get(t, empty_frame)
         gt_states = [
             state
             for _, sub in gt_tracks.items()
@@ -217,7 +250,14 @@ def compute_tracking_metrics(gt_df, fused_df, max_match_distance=200.0):
     }
 
 
-def compute_target_specific_metrics(gt_df, fused_df, target_callsign, max_match_distance=200.0):
+def compute_target_specific_metrics(
+    gt_df,
+    fused_df,
+    target_callsign,
+    max_match_distance=500.0,
+    evaluation_times=None,
+    prepared_fused_frames=None,
+):
     gt_key = "callsign" if "callsign" in gt_df.columns else "target"
     gt_target = gt_df[gt_df[gt_key] == target_callsign]
     
@@ -250,9 +290,21 @@ def compute_target_specific_metrics(gt_df, fused_df, target_callsign, max_match_
     id_switches = 0
     prev_assign = {}
     matched_rows = []
+    fused_frames = prepared_fused_frames
+    if fused_frames is None:
+        fused_frames = {
+            t: frame.reset_index(drop=True)
+            for t, frame in fused_df.groupby("time", sort=False)
+        }
+    empty_frame = fused_df.iloc[0:0].copy()
     
-    for t in sorted(fused_df["time"].unique()):
-        fused_frame = fused_df[fused_df["time"] == t].reset_index(drop=True)
+    timeline = (
+        sorted(set(evaluation_times))
+        if evaluation_times is not None
+        else sorted(fused_df["time"].unique())
+    )
+    for t in timeline:
+        fused_frame = fused_frames.get(t, empty_frame)
         
         if t < gt_target["time"].iloc[0] or t > gt_target["time"].iloc[-1]:
             continue

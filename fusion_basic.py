@@ -22,6 +22,16 @@ def tq_to_cov(tq):
     sv = SIGMA_VEL_MAX * (SIGMA_VEL_MIN / SIGMA_VEL_MAX) ** frac
     return np.diag([sp**2, sv**2, sp**2, sv**2, sp**2, sv**2])
 
+
+def measurement_cov_from_row(row):
+    """Use sensor-provided uncertainty when it is available."""
+    if "sigma_pos_m" in row and "sigma_vel_mps" in row:
+        sp = float(row["sigma_pos_m"])
+        sv = float(row["sigma_vel_mps"])
+        if np.isfinite(sp) and np.isfinite(sv) and sp > 0 and sv > 0:
+            return np.diag([sp**2, sv**2, sp**2, sv**2, sp**2, sv**2])
+    return tq_to_cov(row.get("track_quality", TQ_MAX))
+
 # ---------------------------------------------------------
 # 2. GLOBAL TRACK SINIFI VE TRACK MANAGEMENT (Rapordaki Adım 6)
 # ---------------------------------------------------------
@@ -278,33 +288,45 @@ def run_basic_fusion(
     if verbose:
         print("Asenkron sensör verileri işleniyor...")
 
-    for idx, row in df.iterrows():
-        t = row["time"]
-        local_state = np.array([
-            row["x"],
-            row["vx"],
-            row["y"],
-            row["vy"],
-            row.get("z", 0.0),
-            row.get("vz", 0.0),
-        ]).reshape(6, 1)
-        local_cov = tq_to_cov(row["track_quality"])
-        fusion_center.process_measurement(t, local_state, local_cov, row["track_quality"])
+    # Process a complete sensor scan before emitting a snapshot.  The previous
+    # ``idx % 50`` sampling made output density depend on CSV row count and
+    # therefore produced misleading recall values.
+    for t, group in df.groupby("time", sort=True):
+        for _, row in group.iterrows():
+            local_state = np.array([
+                row["x"],
+                row["vx"],
+                row["y"],
+                row["vy"],
+                row.get("z", 0.0),
+                row.get("vz", 0.0),
+            ]).reshape(6, 1)
+            local_cov = measurement_cov_from_row(row)
+            tq = row.get("track_quality", TQ_MAX)
+            fusion_center.process_measurement(t, local_state, local_cov, tq)
 
-        if idx % 50 == 0:
-            for gt in fusion_center.global_tracks:
-                if gt.state_status == "CONFIRMED":
-                    output_records.append({
-                        "time": t,
-                        "global_track_id": gt.id,
-                        "x": gt.state[0, 0],
-                        "y": gt.state[2, 0],
-                        "z": gt.state[4, 0],
-                        "vx": gt.state[1, 0],
-                        "vy": gt.state[3, 0],
-                        "vz": gt.state[5, 0],
-                        "prob": round(gt.existence_prob, 3)
-                    })
+        for gt in fusion_center.global_tracks:
+            if gt.state_status == "CONFIRMED":
+                sigmas = np.sqrt(np.maximum(np.diag(gt.cov), 1e-12))
+                output_records.append({
+                    "time": t,
+                    "global_track_id": gt.id,
+                    "x": gt.state[0, 0],
+                    "y": gt.state[2, 0],
+                    "z": gt.state[4, 0],
+                    "vx": gt.state[1, 0],
+                    "vy": gt.state[3, 0],
+                    "vz": gt.state[5, 0],
+                    "pos_sigma_m": sigmas[0],
+                    "vel_sigma_mps": sigmas[1],
+                    "sigma_x_m": sigmas[0],
+                    "sigma_vx_mps": sigmas[1],
+                    "sigma_y_m": sigmas[2],
+                    "sigma_vy_mps": sigmas[3],
+                    "sigma_z_m": sigmas[4],
+                    "sigma_vz_mps": sigmas[5],
+                    "prob": round(gt.existence_prob, 3),
+                })
 
     fused_df = pd.DataFrame(output_records)
     fused_df.to_csv(output_csv, index=False)

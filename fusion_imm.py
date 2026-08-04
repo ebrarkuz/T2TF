@@ -5,7 +5,7 @@ Gorevi: radar_sensor_tracks.csv uzerinden DEKUPLE DUAL-IMM tabanli
 track-to-track fuzyon calistirip fused_tracks_imm3.csv cikisi olusturmaktir.
 
 Mimari:
- - Yatay Eksen (X, Y): 3 Modlu IMM [CV, CA_LOW, CA_HIGH]
+ - Yatay Eksen (X, Y): 4 Modlu IMM [CV, CA, CT_LEFT, CT_RIGHT]
  - Dikey Eksen (Z)   : 2 Modlu IMM [CV, SINGER]
 Olcum ve Surec gürültüleri eksenlerin dogasina (manevra vs. tırmanma) ozel ayrıştırılmıştır.
 """
@@ -13,11 +13,11 @@ Olcum ve Surec gürültüleri eksenlerin dogasina (manevra vs. tırmanma) ozel a
 import math
 import warnings
 from typing import Dict, List, Tuple
-from xml import dom
-
 import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment, minimize_scalar
+from scipy.special import logsumexp
+from scipy.stats import chi2
 
 warnings.filterwarnings("ignore")
 
@@ -25,28 +25,39 @@ warnings.filterwarnings("ignore")
 # KONFIGURASYON & SABITLER
 # ===========================================================================
 
-# --- YATAY (XY) IMM SABITLERI ---
-CV_XY_PROCESS_NOISE_INTENSITY = 0.4
-CA_LOW_XY_PROCESS_NOISE_INTENSITY = 0.8
-CA_HIGH_XY_PROCESS_NOISE_INTENSITY = 15.0
-CV_ACCEL_LEAK_Q = 1e-4
-
 # --- DIKEY (Z) IMM SABITLERI ---
 CV_Z_PROCESS_NOISE_INTENSITY = 0.2
 SINGER_TAU_Z = 10.0      # İvme korelasyon süresi (Pilotun tırmanmayı sürdürme süresi ~10 sn)
 SINGER_SIGMA_Z = 2.0     # Dikey manevra standart sapması (m/s^2)
 
 # --- AYRIK GATING (MAHALANOBIS) ESIKLERI ---
-GATE_CHI2_4DOF = 20.0    # x, y, vx, vy icin (~%99 guven araligi)
-GATE_CHI2_2DOF = 25.0    # z, vz icin (~%99 guven araligi)
+GATE_CONFIDENCE = 0.997
+GATE_CHI2_4DOF = float(chi2.ppf(GATE_CONFIDENCE, df=4))
+GATE_CHI2_2DOF = float(chi2.ppf(GATE_CONFIDENCE, df=2))
+MANEUVER_GATE_MULTIPLIER = 1.4
 
 COAST_TIME_LIMIT = 30.0
-CONFIRM_HITS = 2
+CONFIRM_HITS = 4
+CONFIRM_EXISTENCE_THRESHOLD = 0.85
+MIN_CONFIRM_RADARS = 2
+SINGLE_RADAR_CONFIRM_HITS = 8
+SINGLE_RADAR_CONFIRM_EXISTENCE = 0.95
+EXISTENCE_DECAY_TAU_S = 30.0
+MISS_DECAY_START_S = 5.0
+MISS_DECAY_TAU_S = 15.0
+MEASUREMENT_EXISTENCE_GAIN_MIN = 0.50
+MEASUREMENT_EXISTENCE_GAIN_MAX = 0.95
+SOURCE_MAP_TIMEOUT_S = 20.0
+REVIVE_WINDOW_S = 10.0
+REVIVE_DIST_XY_M = 400.0
+REVIVE_DIST_Z_M = 1000.0
+REVIVE_VEL_MPS = 80.0
 
 # --- CIFT KAYIT (DUPLICATE) BIRLESTIRME ---
 DUPLICATE_DIST_XY_M = 400.0
 DUPLICATE_DIST_Z_M = 1000.0
-DUPLICATE_VEL_MPS = 150.0
+DUPLICATE_VEL_MPS = 80.0
+DUPLICATE_STRONG_MAHALANOBIS = 9.0
 
 TQ_MIN, TQ_MAX = 1, 15
 SIGMA_POS_MAX, SIGMA_POS_MIN = 1500.0, 30.0
@@ -54,13 +65,18 @@ SIGMA_VEL_MAX, SIGMA_VEL_MIN = 25.0, 0.5
 
 ELEVATION_ERROR_RAD = 0.005       # Radarin irtifa acisi hatasi (orn: ~0.3 derece)
 MISSING_Z_COVAR_PENALTY = 1e6     # Z verisi yoksa filtreyi korlemek icin devasa kovaryans
+COV_MIN_EIG = 1e-6
+XY_VARIANCE_FLOOR = np.array([25.0, 0.25, 0.01, 25.0, 0.25, 0.01])
+Z_VARIANCE_FLOOR = np.array([25.0, 0.25, 0.01])
+STATE9_VARIANCE_FLOOR = np.array([25.0, 0.25, 0.01, 25.0, 0.25, 0.01, 25.0, 0.25, 0.01])
+INITIAL_ACCEL_VARIANCE = 100.0
 
 # --- AYRIK IMM GECIS OLASILIKLARI VE MODLAR ---
 # --- YATAY (XY) IMM SABITLERI ---
 CV_XY_PROCESS_NOISE_INTENSITY = 0.4
 CA_XY_PROCESS_NOISE_INTENSITY = 8.0      # Genel keskin manevralar için tek CA
 CT_XY_PROCESS_NOISE_INTENSITY = 2.0      # Dönüş sırasındaki ufak sapmalar
-CV_ACCEL_LEAK_Q = 1e-4
+CV_ACCEL_LEAK_Q = 1e-3
 
 TURN_RATE_DEG_PER_SEC = 1.5             # Standart dönüş hızı (saniyede 3 derece)
 OMEGA_LEFT = math.radians(TURN_RATE_DEG_PER_SEC)
@@ -70,10 +86,10 @@ OMEGA_RIGHT = math.radians(-TURN_RATE_DEG_PER_SEC)
 MODELS_XY = ["CV", "CA", "CT_LEFT", "CT_RIGHT"]
 TRANS_PROB_XY = np.array([
     # ->CV    ->CA     ->CT_L   ->CT_R
-    [0.60,    0.05,    0.175,   0.175],   # CV'den geçiş
-    [0.20,    0.60,    0.10,    0.10 ],   # CA'dan geçiş
-    [0.10,    0.05,    0.80,    0.05 ],   # CT_LEFT'ten geçiş
-    [0.10,    0.05,    0.05,    0.80 ],   # CT_RIGHT'tan geçiş
+    [0.94, 0.03, 0.015, 0.015],
+    [0.10, 0.80, 0.05,  0.05 ],
+    [0.05, 0.03, 0.90,  0.02 ],
+    [0.05, 0.03, 0.02,  0.90 ],
 ])
 INIT_MODE_PROB_XY = np.array([0.70, 0.10, 0.10, 0.10]) 
 
@@ -85,8 +101,24 @@ TRANS_PROB_Z = np.array([
 ])
 INIT_MODE_PROB_Z = np.array([0.90, 0.10])
 
+assert np.allclose(TRANS_PROB_XY.sum(axis=1), 1.0)
+assert np.allclose(TRANS_PROB_Z.sum(axis=1), 1.0)
+
 SENSOR_CSV = "radar_sensor_tracks.csv"
 OUTPUT_FUSED_CSV = "fused_tracks_imm3.csv"
+OUTPUT_COLUMNS = [
+    "time", "global_track_id", "x", "y", "z", "vx", "vy", "vz",
+    "ax", "ay", "az", "pos_sigma_m", "vel_sigma_mps", "sigma_x_m",
+    "sigma_vx_mps", "sigma_y_m", "sigma_vy_mps", "sigma_z_m",
+    "sigma_vz_mps", "fused_tq", "prob", "mode_prob_xy_cv",
+    "mode_prob_xy_ca", "mode_prob_xy_ct_left", "mode_prob_xy_ct_right",
+    "mode_prob_z_cv", "mode_prob_z_singer", "dominant_model", "n_sources",
+    "source_radars", "update_used", "is_prediction_only", "time_since_update_s",
+]
+DEBUG_OUTPUT_COLUMNS = [
+    "min_cov_eig", "max_cov_eig", "cov_condition_number",
+    "xy_mode_entropy", "z_mode_entropy",
+]
 
 # ===========================================================================
 # YARDIMCI FONKSIYONLAR 
@@ -107,9 +139,79 @@ def sigma_pos_to_tq(sigma_pos: float) -> int:
     tq = TQ_MIN + frac * (TQ_MAX - TQ_MIN)
     return int(round(np.clip(tq, TQ_MIN, TQ_MAX)))
 
+
+def _normalize_probabilities(p, floor=1e-12):
+    p = np.asarray(p, dtype=float).reshape(-1)
+    p = np.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
+    p = np.maximum(p, 0.0)
+    p = np.maximum(p, floor)
+    total = float(p.sum())
+    if not math.isfinite(total) or total <= 0.0:
+        return np.full_like(p, 1.0 / len(p))
+    return p / total
+
+
+def regularize_covariance(P, min_eig=COV_MIN_EIG, variance_floor=None):
+    P = np.asarray(P, dtype=float)
+    if P.ndim != 2 or P.shape[0] != P.shape[1]:
+        raise ValueError("Covariance kare bir matris olmalı")
+    P = np.nan_to_num(0.5 * (P + P.T), nan=0.0, posinf=1e12, neginf=-1e12)
+    if variance_floor is not None:
+        floor = np.asarray(variance_floor, dtype=float)
+        if floor.shape != (P.shape[0],):
+            raise ValueError("Variance floor covariance boyutuyla uyuşmuyor")
+        diagonal = np.maximum(np.diag(P), floor)
+        P[np.diag_indices_from(P)] = diagonal
+    eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (P + P.T))
+    eigenvalues = np.maximum(eigenvalues, min_eig)
+    P = (eigenvectors * eigenvalues) @ eigenvectors.T
+    if variance_floor is not None:
+        P[np.diag_indices_from(P)] = np.maximum(np.diag(P), floor)
+    return 0.5 * (P + P.T)
+
+
+def _state_variance_floor(dimension):
+    if dimension == 3:
+        return Z_VARIANCE_FLOOR
+    if dimension == 6:
+        return XY_VARIANCE_FLOOR
+    if dimension == 9:
+        return STATE9_VARIANCE_FLOOR
+    return None
+
+
+def _solve_or_pinv(A, B):
+    A = regularize_covariance(A)
+    try:
+        return np.linalg.solve(A, B)
+    except np.linalg.LinAlgError:
+        return np.linalg.pinv(A) @ B
+
+
+def _mahalanobis_squared(diff, covariance):
+    solution = _solve_or_pinv(covariance, diff)
+    value = float((diff.T @ solution).item())
+    return max(value, 0.0) if math.isfinite(value) else math.inf
+
+
+def _validate_measurement(state, covariance):
+    state = np.asarray(state, dtype=float)
+    covariance = np.asarray(covariance, dtype=float)
+    return (
+        np.isfinite(state).all()
+        and np.isfinite(covariance).all()
+        and covariance.ndim == 2
+        and covariance.shape[0] == covariance.shape[1]
+        and np.all(np.diag(covariance) > 0.0)
+    )
+
 def measurement_cov_from_row(row) -> np.ndarray:
     sp = float(row.get("sigma_pos_m", tq_to_sigma_pos(row.get("track_quality", TQ_MAX))))
     sv = float(row.get("sigma_vel_mps", tq_to_sigma_vel(row.get("track_quality", TQ_MAX))))
+    if not math.isfinite(sp) or sp <= 0:
+        sp = tq_to_sigma_pos(row.get("track_quality", TQ_MAX))
+    if not math.isfinite(sv) or sv <= 0:
+        sv = tq_to_sigma_vel(row.get("track_quality", TQ_MAX))
     
     if all(k in row for k in ["range", "azimuth", "elevation", "sigma_range", "sigma_az", "sigma_el"]):
         r, az, el = float(row["range"]), float(row["azimuth"]), float(row["elevation"])
@@ -121,34 +223,34 @@ def measurement_cov_from_row(row) -> np.ndarray:
         R_polar = np.diag([float(row["sigma_range"])**2, float(row["sigma_az"])**2, float(row["sigma_el"])**2])
         R_cart = J @ R_polar @ J.T
         
-        return np.diag([
-            R_cart[0,0], sv**2, 
-            R_cart[1,1], sv**2, 
-            R_cart[2,2], sv**2
-        ])
+        R = np.zeros((6, 6))
+        position_indices = [0, 2, 4]
+        R[np.ix_(position_indices, position_indices)] = R_cart
+        R[1, 1] = R[3, 3] = R[5, 5] = sv**2
+        return regularize_covariance(R)
         
     if pd.isna(row.get("z")):
-        return np.diag([sp**2, sv**2, sp**2, sv**2, MISSING_Z_COVAR_PENALTY, MISSING_Z_COVAR_PENALTY])
+        return regularize_covariance(np.diag([sp**2, sv**2, sp**2, sv**2, MISSING_Z_COVAR_PENALTY, MISSING_Z_COVAR_PENALTY]))
 
     x, y = float(row.get("x", 0.0)), float(row.get("y", 0.0))
     rng = math.sqrt(x**2 + y**2)
     sz = math.sqrt(sp**2 + (rng * ELEVATION_ERROR_RAD)**2)
     svz = sv * 1.5 
     
-    return np.diag([sp**2, sv**2, sp**2, sv**2, sz**2, svz**2])
+    return regularize_covariance(np.diag([sp**2, sv**2, sp**2, sv**2, sz**2, svz**2]))
 
 def _pad_xy_meas(meas_4d, cov_4d):
     s = np.zeros((6, 1))
     s[0,0], s[1,0], s[3,0], s[4,0] = meas_4d[0,0], meas_4d[1,0], meas_4d[2,0], meas_4d[3,0]
-    c = np.eye(6) * 1e5
-    c[0:2, 0:2] = cov_4d[0:2, 0:2]
-    c[3:5, 3:5] = cov_4d[2:4, 2:4]
+    c = np.eye(6) * INITIAL_ACCEL_VARIANCE
+    mapped = [0, 1, 3, 4]
+    c[np.ix_(mapped, mapped)] = cov_4d
     return s, c
 
 def _pad_z_meas(meas_2d, cov_2d):
     s = np.zeros((3, 1))
     s[0,0], s[1,0] = meas_2d[0,0], meas_2d[1,0]
-    c = np.eye(3) * 1e5
+    c = np.eye(3) * INITIAL_ACCEL_VARIANCE
     c[0:2, 0:2] = cov_2d[0:2, 0:2]
     return s, c
 
@@ -188,11 +290,11 @@ def _F_Q_xy_ca(dt: float, q_intensity: float) -> Tuple[np.ndarray, np.ndarray]:
         [0, 0, 0, 0, 0, 1],
     ])
     q = q_intensity ** 2
-    dt2, dt3, dt4 = dt**2, dt**3, dt**4
+    dt2, dt3, dt4, dt5 = dt**2, dt**3, dt**4, dt**5
     qb = q * np.array([
-        [dt4 / 4, dt3 / 2, dt2 / 2],
-        [dt3 / 2, dt2, dt],
-        [dt2 / 2, dt, 1],
+        [dt5 / 20, dt4 / 8, dt3 / 6],
+        [dt4 / 8, dt3 / 3, dt2 / 2],
+        [dt3 / 6, dt2 / 2, dt],
     ])
     Q = np.zeros((6, 6))
     Q[0:3, 0:3] = qb
@@ -200,7 +302,22 @@ def _F_Q_xy_ca(dt: float, q_intensity: float) -> Tuple[np.ndarray, np.ndarray]:
     return F, Q
 
 def _F_Q_xy_cv(dt: float) -> Tuple[np.ndarray, np.ndarray]:
-    F, Q = _F_Q_xy_ca(dt, CV_XY_PROCESS_NOISE_INTENSITY)
+    F = np.array([
+        [1, dt, 0, 0, 0, 0],
+        [0, 1,  0, 0, 0, 0],
+        [0, 0,  0, 0, 0, 0],
+        [0, 0,  0, 1, dt, 0],
+        [0, 0,  0, 0, 1,  0],
+        [0, 0,  0, 0, 0,  0],
+    ], dtype=float)
+    q = CV_XY_PROCESS_NOISE_INTENSITY ** 2
+    qb = q * np.array([
+        [dt**3 / 3, dt**2 / 2],
+        [dt**2 / 2, dt],
+    ])
+    Q = np.zeros((6, 6))
+    Q[np.ix_([0, 1], [0, 1])] = qb
+    Q[np.ix_([3, 4], [3, 4])] = qb
     Q[2, 2] = CV_ACCEL_LEAK_Q
     Q[5, 5] = CV_ACCEL_LEAK_Q
     return F, Q
@@ -298,61 +415,81 @@ MODEL_FQ_Z = {
 # FUZYON (OLCUM BIRLESTIRME) FONKSIYONLARI
 # ===========================================================================
 def _ci_fuse(x1, P1, x2, P2):
-    P1i, P2i = np.linalg.inv(P1), np.linalg.inv(P2)
+    floor = _state_variance_floor(P1.shape[0])
+    P1 = regularize_covariance(P1, variance_floor=floor)
+    P2 = regularize_covariance(P2, variance_floor=floor)
+    identity = np.eye(P1.shape[0])
+    P1i = _solve_or_pinv(P1, identity)
+    P2i = _solve_or_pinv(P2, identity)
     def trace_f(omega):
-        try:
-            return float(np.trace(np.linalg.inv(omega * P1i + (1 - omega) * P2i)))
-        except np.linalg.LinAlgError:
-            return np.inf
+        information = omega * P1i + (1 - omega) * P2i
+        return float(np.trace(_solve_or_pinv(information, identity)))
 
     res = minimize_scalar(trace_f, bounds=(1e-3, 1 - 1e-3), method="bounded")
     omega = res.x
-    Pf = np.linalg.inv(omega * P1i + (1 - omega) * P2i)
-    Pf = 0.5 * (Pf + Pf.T)
+    Pf = _solve_or_pinv(omega * P1i + (1 - omega) * P2i, identity)
+    Pf = regularize_covariance(Pf, variance_floor=floor)
     xf = Pf @ (omega * P1i @ x1 + (1 - omega) * P2i @ x2)
     return xf, Pf
 
 def _standard_fuse(x1, P1, x2, P2):
-    try:
-        S = P1 + P2
-        S_inv = np.linalg.inv(S)
-        K = P1 @ S_inv
-        xf = x1 + K @ (x2 - x1)
-        Pf = P1 - K @ P1
-        Pf = 0.5 * (Pf + Pf.T)
-        return xf, Pf
-    except np.linalg.LinAlgError:
-        return x1, P1
+    identity = np.eye(P1.shape[0])
+    return _kalman_measurement_update(x1, P1, x2, P2, identity)
 
-def _gaussian_likelihood(diff: np.ndarray, S: np.ndarray) -> float:
-    try:
-        S_inv = np.linalg.inv(S)
-        sign, logdet = np.linalg.slogdet(S)
-        if sign <= 0: return 1e-12
-        d2 = float((diff.T @ S_inv @ diff).item())
-        k = diff.shape[0]
-        log_lik = -0.5 * (d2 + logdet + k * math.log(2 * math.pi))
-        return math.exp(max(log_lik, -700.0))
-    except np.linalg.LinAlgError:
-        return 1e-12
+
+def _kalman_measurement_update(x, P, z, R, H):
+    """Numerically stable direct-measurement update using Joseph covariance form."""
+    floor = _state_variance_floor(P.shape[0])
+    P = regularize_covariance(P, variance_floor=floor)
+    R = regularize_covariance(R)
+    innovation = z - H @ x
+    S = regularize_covariance(H @ P @ H.T + R)
+    K = _solve_or_pinv(S, H @ P).T
+    x_new = x + K @ innovation
+    identity = np.eye(P.shape[0])
+    residual_map = identity - K @ H
+    P_new = residual_map @ P @ residual_map.T + K @ R @ K.T
+    return x_new, regularize_covariance(P_new, variance_floor=floor)
+
+
+def _gaussian_log_likelihood(diff: np.ndarray, S: np.ndarray) -> float:
+    S = regularize_covariance(S)
+    sign, logdet = np.linalg.slogdet(S)
+    if sign <= 0 or not math.isfinite(logdet):
+        return -math.inf
+    d2 = _mahalanobis_squared(diff, S)
+    if not math.isfinite(d2):
+        return -math.inf
+    k = diff.shape[0]
+    return -0.5 * (d2 + logdet + k * math.log(2 * math.pi))
 
 # ===========================================================================
 # DEKUPLE DUAL-IMM GLOBAL TRACK 
 # ===========================================================================
 class GlobalTrackIMM3:
     _cnt = 0
-    def __init__(self, t, state_6d, cov_6d, tq, src, use_ci=True):
+    def __init__(self, t, state_6d, cov_6d, tq, src, use_ci=True, debug=False):
+        if not _validate_measurement(state_6d, cov_6d):
+            raise ValueError("Başlangıç state/covariance değerleri geçersiz")
         GlobalTrackIMM3._cnt += 1
         self.id = f"GT-{GlobalTrackIMM3._cnt:04d}"
         self.time = t
         self.use_ci = use_ci
+        self.debug = debug
+        self.mode_change_log = []
         
         # 6D ölçümü, XY (4D ölçüm -> 6D state) ve Z (2D ölçüm -> 3D state) olarak ayır
         xy_state = np.array([[state_6d[0,0]], [state_6d[1,0]], [0.0], [state_6d[2,0]], [state_6d[3,0]], [0.0]])
         z_state = np.array([[state_6d[4,0]], [state_6d[5,0]], [0.0]])
         
-        xy_cov = np.diag([cov_6d[0,0], cov_6d[1,1], 1e4, cov_6d[2,2], cov_6d[3,3], 1e4])
-        z_cov = np.diag([cov_6d[4,4], cov_6d[5,5], 1e4])
+        _, xy_cov = _pad_xy_meas(
+            state_6d[0:4], cov_6d[np.ix_([0, 1, 2, 3], [0, 1, 2, 3])]
+        )
+        _, z_cov = _pad_z_meas(
+            state_6d[4:6], cov_6d[np.ix_([4, 5], [4, 5])]
+        )
+        xy_cov = regularize_covariance(xy_cov, variance_floor=XY_VARIANCE_FLOOR)
+        z_cov = regularize_covariance(z_cov, variance_floor=Z_VARIANCE_FLOOR)
 
         # --- YATAY IMM ---
         self.xy_models = MODELS_XY
@@ -377,6 +514,7 @@ class GlobalTrackIMM3:
         self.hits_count = 1
         self.creation_time = t
         self.position_history = [(float(self.state[0, 0]), float(self.state[3, 0]), float(self.state[6, 0]), float(t))]
+        self._last_dominant_model = self.dominant_model()
 
     def _combine_to_9d(self):
         # XY Birlestirme
@@ -395,49 +533,109 @@ class GlobalTrackIMM3:
         cov_9d = np.zeros((9, 9))
         cov_9d[0:6, 0:6] = P_xy
         cov_9d[6:9, 6:9] = P_z
-        
-        return state_9d, 0.5 * (cov_9d + cov_9d.T)
+        if not np.isfinite(state_9d).all():
+            raise FloatingPointError("IMM birleşik state içinde NaN/inf oluştu")
+        return state_9d, regularize_covariance(
+            cov_9d, variance_floor=STATE9_VARIANCE_FLOOR
+        )
+
+    def _validate_mode_probabilities(self, fallback_xy=None, fallback_z=None):
+        xy = np.array([self.xy_mode_prob[m] for m in self.xy_models], dtype=float)
+        z = np.array([self.z_mode_prob[m] for m in self.z_models], dtype=float)
+        if not np.isfinite(xy).all():
+            warnings.warn(f"{self.id}: geçersiz XY mode probability; önceki değer korundu")
+            xy = INIT_MODE_PROB_XY if fallback_xy is None else fallback_xy
+        if not np.isfinite(z).all():
+            warnings.warn(f"{self.id}: geçersiz Z mode probability; önceki değer korundu")
+            z = INIT_MODE_PROB_Z if fallback_z is None else fallback_z
+        xy = _normalize_probabilities(xy)
+        z = _normalize_probabilities(z)
+        self.xy_mode_prob = dict(zip(self.xy_models, xy))
+        self.z_mode_prob = dict(zip(self.z_models, z))
+        current = self.dominant_model()
+        if self.debug and current != self._last_dominant_model:
+            self.mode_change_log.append((float(self.time), self._last_dominant_model, current))
+        self._last_dominant_model = current
+
+    def covariance_debug_fields(self):
+        eigenvalues = np.linalg.eigvalsh(self.cov)
+        positive = np.maximum(eigenvalues, COV_MIN_EIG)
+        xy = _normalize_probabilities(list(self.xy_mode_prob.values()))
+        z = _normalize_probabilities(list(self.z_mode_prob.values()))
+        return {
+            "min_cov_eig": float(eigenvalues.min()),
+            "max_cov_eig": float(eigenvalues.max()),
+            "cov_condition_number": float(positive.max() / positive.min()),
+            "xy_mode_entropy": float(-np.sum(xy * np.log(xy))),
+            "z_mode_entropy": float(-np.sum(z * np.log(z))),
+        }
 
     def propagate(self, t):
         dt = t - self.time
-        if dt <= 0: return
+        if dt < 0:
+            raise ValueError("Track zamanı geriye doğru ilerleyemez")
+        if dt == 0:
+            return
 
         # --- YATAY IMM TAHMINI ---
-        mu_xy = np.array([self.xy_mode_prob[m] for m in self.xy_models])
-        c_bar_xy = np.clip(TRANS_PROB_XY.T @ mu_xy, 1e-12, None)
+        mu_xy = _normalize_probabilities([self.xy_mode_prob[m] for m in self.xy_models])
+        c_bar_xy = _normalize_probabilities(TRANS_PROB_XY.T @ mu_xy)
         mix_w_xy = (TRANS_PROB_XY * mu_xy[:, None]) / c_bar_xy[None, :]
+        mix_w_xy = np.column_stack([
+            _normalize_probabilities(mix_w_xy[:, j])
+            for j in range(mix_w_xy.shape[1])
+        ])
         
         for j, mj in enumerate(self.xy_models):
             x0j = sum(mix_w_xy[i, j] * self.xy_model_state[mi] for i, mi in enumerate(self.xy_models))
             P0j = sum(mix_w_xy[i, j] * (self.xy_model_cov[mi] + (self.xy_model_state[mi] - x0j) @ (self.xy_model_state[mi] - x0j).T) for i, mi in enumerate(self.xy_models))
+            P0j = regularize_covariance(P0j, variance_floor=XY_VARIANCE_FLOOR)
             
             F, Q = MODEL_FQ_XY[mj](dt)
             self.xy_model_state[mj] = F @ x0j
-            self.xy_model_cov[mj] = 0.5 * ((F @ P0j @ F.T + Q) + (F @ P0j @ F.T + Q).T)
+            self.xy_model_cov[mj] = regularize_covariance(
+                F @ P0j @ F.T + Q, variance_floor=XY_VARIANCE_FLOOR
+            )
             
         self.xy_mode_prob = dict(zip(self.xy_models, c_bar_xy))
 
         # --- DIKEY IMM TAHMINI ---
-        mu_z = np.array([self.z_mode_prob[m] for m in self.z_models])
-        c_bar_z = np.clip(TRANS_PROB_Z.T @ mu_z, 1e-12, None)
+        mu_z = _normalize_probabilities([self.z_mode_prob[m] for m in self.z_models])
+        c_bar_z = _normalize_probabilities(TRANS_PROB_Z.T @ mu_z)
         mix_w_z = (TRANS_PROB_Z * mu_z[:, None]) / c_bar_z[None, :]
+        mix_w_z = np.column_stack([
+            _normalize_probabilities(mix_w_z[:, j])
+            for j in range(mix_w_z.shape[1])
+        ])
         
         for j, mj in enumerate(self.z_models):
             x0j = sum(mix_w_z[i, j] * self.z_model_state[mi] for i, mi in enumerate(self.z_models))
             P0j = sum(mix_w_z[i, j] * (self.z_model_cov[mi] + (self.z_model_state[mi] - x0j) @ (self.z_model_state[mi] - x0j).T) for i, mi in enumerate(self.z_models))
+            P0j = regularize_covariance(P0j, variance_floor=Z_VARIANCE_FLOOR)
             
             F, Q = MODEL_FQ_Z[mj](dt)
             self.z_model_state[mj] = F @ x0j
-            self.z_model_cov[mj] = 0.5 * ((F @ P0j @ F.T + Q) + (F @ P0j @ F.T + Q).T)
+            self.z_model_cov[mj] = regularize_covariance(
+                F @ P0j @ F.T + Q, variance_floor=Z_VARIANCE_FLOOR
+            )
             
         self.z_mode_prob = dict(zip(self.z_models, c_bar_z))
 
         self.time = t
+        self._validate_mode_probabilities(mu_xy, mu_z)
         self.state, self.cov = self._combine_to_9d()
-        self.existence_prob *= 0.99
+        self.existence_prob *= math.exp(-dt / EXISTENCE_DECAY_TAU_S)
+        time_since_update = self.time - self.last_update
+        if time_since_update > MISS_DECAY_START_S:
+            extra_dt = min(dt, time_since_update - MISS_DECAY_START_S)
+            self.existence_prob *= math.exp(-extra_dt / MISS_DECAY_TAU_S)
+        self.existence_prob = float(np.clip(self.existence_prob, 0.0, 1.0))
         self._update_status()
 
     def update(self, meas_state_6d, meas_cov_6d, tq, src):
+        if not _validate_measurement(meas_state_6d, meas_cov_6d):
+            warnings.warn(f"{self.id}: NaN/inf veya geçersiz covariance içeren ölçüm atlandı")
+            return False
         meas_xy = meas_state_6d[0:4] # x, vx, y, vy
         cov_xy = meas_cov_6d[np.ix_([0,1,2,3], [0,1,2,3])]
         m_s_xy, m_c_xy = _pad_xy_meas(meas_xy, cov_xy)
@@ -447,49 +645,66 @@ class GlobalTrackIMM3:
         m_s_z, m_c_z = _pad_z_meas(meas_z, cov_z)
 
         # --- YATAY IMM GUNCELLEMESI ---
-        likelihoods_xy = {}
+        previous_mu_xy = np.array([self.xy_mode_prob[m] for m in self.xy_models])
+        log_likelihoods_xy = []
         for m in self.xy_models:
             x_pred, P_pred = self.xy_model_state[m], self.xy_model_cov[m]
             S = H_MEAS_XY @ P_pred @ H_MEAS_XY.T + cov_xy
             diff = meas_xy - (H_MEAS_XY @ x_pred)
-            likelihoods_xy[m] = _gaussian_likelihood(diff, S)
-            
-            if self.use_ci:
-                xf, Pf = _ci_fuse(x_pred, P_pred, m_s_xy, m_c_xy)
-            else:
-                xf, Pf = _standard_fuse(x_pred, P_pred, m_s_xy, m_c_xy)
-            self.xy_model_state[m], self.xy_model_cov[m] = xf, Pf
+            log_likelihoods_xy.append(_gaussian_log_likelihood(diff, S))
 
-        c_bar_xy = np.array([self.xy_mode_prob[m] for m in self.xy_models])
-        raw_xy = c_bar_xy * np.array([likelihoods_xy[m] for m in self.xy_models])
-        if raw_xy.sum() > 0: new_mu_xy = raw_xy / raw_xy.sum()
-        else: new_mu_xy = c_bar_xy
-        new_mu_xy = np.clip(new_mu_xy, 1e-3, 1 - 1e-3)
-        self.xy_mode_prob = dict(zip(self.xy_models, new_mu_xy / new_mu_xy.sum()))
+            # Direct radar measurements use a Kalman update. ``use_ci`` is kept
+            # for API compatibility and future correlated track-to-track input.
+            xf, Pf = _kalman_measurement_update(
+                x_pred, P_pred, meas_xy, cov_xy, H_MEAS_XY
+            )
+            self.xy_model_state[m] = xf
+            self.xy_model_cov[m] = regularize_covariance(
+                Pf, variance_floor=XY_VARIANCE_FLOOR
+            )
+
+        prior_xy = _normalize_probabilities(previous_mu_xy)
+        log_raw_xy = np.log(prior_xy) + np.asarray(log_likelihoods_xy)
+        if np.isfinite(log_raw_xy).any():
+            new_mu_xy = np.exp(log_raw_xy - logsumexp(log_raw_xy))
+        else:
+            warnings.warn("XY IMM olasılık güncellemesi geçersiz; önceki dağılım korundu")
+            new_mu_xy = prior_xy
+        new_mu_xy = _normalize_probabilities(new_mu_xy)
+        self.xy_mode_prob = dict(zip(self.xy_models, new_mu_xy))
 
         # --- DIKEY IMM GUNCELLEMESI ---
-        likelihoods_z = {}
+        previous_mu_z = np.array([self.z_mode_prob[m] for m in self.z_models])
+        log_likelihoods_z = []
         for m in self.z_models:
             x_pred, P_pred = self.z_model_state[m], self.z_model_cov[m]
             S = H_MEAS_Z @ P_pred @ H_MEAS_Z.T + cov_z
             diff = meas_z - (H_MEAS_Z @ x_pred)
-            likelihoods_z[m] = _gaussian_likelihood(diff, S)
-            
-            if self.use_ci:
-                xf, Pf = _ci_fuse(x_pred, P_pred, m_s_z, m_c_z)
-            else:
-                xf, Pf = _standard_fuse(x_pred, P_pred, m_s_z, m_c_z)
-            self.z_model_state[m], self.z_model_cov[m] = xf, Pf
+            log_likelihoods_z.append(_gaussian_log_likelihood(diff, S))
 
-        c_bar_z = np.array([self.z_mode_prob[m] for m in self.z_models])
-        raw_z = c_bar_z * np.array([likelihoods_z[m] for m in self.z_models])
-        if raw_z.sum() > 0: new_mu_z = raw_z / raw_z.sum()
-        else: new_mu_z = c_bar_z
-        new_mu_z = np.clip(new_mu_z, 1e-3, 1 - 1e-3)
-        self.z_mode_prob = dict(zip(self.z_models, new_mu_z / new_mu_z.sum()))
+            xf, Pf = _kalman_measurement_update(
+                x_pred, P_pred, meas_z, cov_z, H_MEAS_Z
+            )
+            self.z_model_state[m] = xf
+            self.z_model_cov[m] = regularize_covariance(
+                Pf, variance_floor=Z_VARIANCE_FLOOR
+            )
+
+        prior_z = _normalize_probabilities(previous_mu_z)
+        log_raw_z = np.log(prior_z) + np.asarray(log_likelihoods_z)
+        if np.isfinite(log_raw_z).any():
+            new_mu_z = np.exp(log_raw_z - logsumexp(log_raw_z))
+        else:
+            warnings.warn("Z IMM olasılık güncellemesi geçersiz; önceki dağılım korundu")
+            new_mu_z = prior_z
+        new_mu_z = _normalize_probabilities(new_mu_z)
+        self.z_mode_prob = dict(zip(self.z_models, new_mu_z))
+        self._validate_mode_probabilities(previous_mu_xy, previous_mu_z)
 
         self.last_update = self.time
-        mp = 0.5 + 0.45 * ((tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
+        mp = MEASUREMENT_EXISTENCE_GAIN_MIN + (
+            MEASUREMENT_EXISTENCE_GAIN_MAX - MEASUREMENT_EXISTENCE_GAIN_MIN
+        ) * ((tq - TQ_MIN) / (TQ_MAX - TQ_MIN))
         self.existence_prob = self.existence_prob + (1 - self.existence_prob) * mp
         self.sources.add(src)
         self.source_radar_names.add(src[0] if isinstance(src, tuple) else src)
@@ -499,11 +714,19 @@ class GlobalTrackIMM3:
         self.state, self.cov = self._combine_to_9d()
         self.position_history.append((float(self.state[0, 0]), float(self.state[3, 0]), float(self.state[6, 0]), float(self.time)))
         self._update_status()
+        return True
 
     def _update_status(self):
         if (self.time - self.last_update) > COAST_TIME_LIMIT or self.existence_prob < 0.2:
             self.status = "DELETED"
-        elif self.existence_prob > 0.85 and self.hits_count >= CONFIRM_HITS:
+        elif (
+            self.existence_prob > CONFIRM_EXISTENCE_THRESHOLD
+            and self.hits_count >= CONFIRM_HITS
+            and len(self.source_radar_names) >= MIN_CONFIRM_RADARS
+        ) or (
+            self.existence_prob > SINGLE_RADAR_CONFIRM_EXISTENCE
+            and self.hits_count >= SINGLE_RADAR_CONFIRM_HITS
+        ):
             self.status = "CONFIRMED"
         else:
             self.status = "TENTATIVE"
@@ -519,12 +742,36 @@ class GlobalTrackIMM3:
 # FUZYON MERKEZI 
 # ===========================================================================
 class FusionCenterIMM3:
-    def __init__(self, use_ci=True, verbose=True):
+    def __init__(self, use_ci=True, verbose=True, debug=False, collect_diagnostics=False):
         self.tracks: List[GlobalTrackIMM3] = []
-        self.src_map: Dict[Tuple, str] = {}
+        self.src_map: Dict[Tuple, dict] = {}
         self.use_ci = use_ci
         self.verbose = verbose
+        self.debug = debug
+        self.collect_diagnostics = bool(collect_diagnostics)
         self.recently_deleted: List[dict] = [] 
+        # Read-only association audit trail.  It does not participate in any
+        # filtering or association decision.
+        self.diagnostic_events: List[dict] = []
+
+    def _source_track_id(self, src, current_time):
+        entry = self.src_map.get(src)
+        if entry is None:
+            return None
+        if current_time - entry["last_seen_time"] > SOURCE_MAP_TIMEOUT_S:
+            return None
+        return entry["global_track_id"]
+
+    def _remember_source(self, src, track_id, current_time):
+        self.src_map[src] = {
+            "global_track_id": track_id,
+            "last_seen_time": float(current_time),
+        }
+
+    def _replace_source_track(self, old_id, new_id):
+        for entry in self.src_map.values():
+            if entry["global_track_id"] == old_id:
+                entry["global_track_id"] = new_id
 
     def _tracks_are_duplicate(self, t1, t2, chi2_thresh=36.0):
         # 1. AYRIK MESAFE KONTROLU (Yatay ve Dikey toleranslar farkli)
@@ -541,16 +788,14 @@ class FusionCenterIMM3:
         dvz = float(t1.state[7, 0]) - float(t2.state[7, 0])
         vel_diff = math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz)
 
-        if dist_xy < DUPLICATE_DIST_XY_M and dist_z < DUPLICATE_DIST_Z_M and vel_diff <= DUPLICATE_VEL_MPS:
-            return True
-
         diff = np.array([[dx], [dy], [dz]])
         P_sum = t1.cov[np.ix_([0, 3, 6], [0, 3, 6])] + t2.cov[np.ix_([0, 3, 6], [0, 3, 6])]
-        try:
-            d2 = float((diff.T @ np.linalg.inv(P_sum) @ diff).item())
-            return d2 < chi2_thresh and vel_diff <= DUPLICATE_VEL_MPS
-        except np.linalg.LinAlgError:
-            return False
+        d2 = _mahalanobis_squared(diff, P_sum)
+        position_close = dist_xy < DUPLICATE_DIST_XY_M and dist_z < DUPLICATE_DIST_Z_M
+        velocity_close = vel_diff <= DUPLICATE_VEL_MPS
+        shares_radar = bool(t1.source_radar_names & t2.source_radar_names)
+        statistically_very_close = d2 < DUPLICATE_STRONG_MAHALANOBIS
+        return position_close and velocity_close and (shares_radar or statistically_very_close)
 
     def _merge_duplicates(self, current_time):
         confirmed_tracks = [gt for gt in self.tracks if gt.status == "CONFIRMED"]
@@ -569,9 +814,7 @@ class FusionCenterIMM3:
                     keeper.sources.update(weaker.sources)
                     keeper.source_radar_names.update(weaker.source_radar_names)
                     keeper.source_measurement_details.update(weaker.source_measurement_details)
-                    for src_key, track_id in list(self.src_map.items()):
-                        if track_id == weaker.id:
-                            self.src_map[src_key] = keeper.id
+                    self._replace_source_track(weaker.id, keeper.id)
                     to_delete.add(weaker.id)
         for c in confirmed_tracks:
             if c.id in to_delete:
@@ -583,28 +826,60 @@ class FusionCenterIMM3:
                     c.sources.update(t.sources)
                     c.source_radar_names.update(t.source_radar_names)
                     c.source_measurement_details.update(t.source_measurement_details)
-                    for src_key, track_id in list(self.src_map.items()):
-                        if track_id == t.id:
-                            self.src_map[src_key] = c.id
+                    self._replace_source_track(t.id, c.id)
                     to_delete.add(t.id)
         self.tracks = [gt for gt in self.tracks if gt.id not in to_delete]
 
     def process_batch(self, t, measurements):
         for gt in self.tracks:
             gt.propagate(t)
+
+        batch_diag = [{
+            "event_type": "measurement",
+            "time": float(t),
+            "label": str(m.get("diagnostic_label", "")),
+            "sensor": str(m["src"][0]),
+            "local_track_id": str(m["src"][1]),
+            "source_map_track_id": None,
+            "source_d2_xy": np.nan,
+            "source_gate_xy": np.nan,
+            "source_d2_z": np.nan,
+            "source_gate_z": np.nan,
+            "source_xy_rejected": False,
+            "source_z_rejected": False,
+            "accepted_stage": "",
+            "assigned_global_track_id": None,
+            "created": False,
+            "revived": False,
+        } for m in measurements]
             
         deleted_tracks = [gt for gt in self.tracks if gt.status == "DELETED"]
         deleted_ids = {gt.id for gt in deleted_tracks}
         for gt in deleted_tracks:
+            if self.collect_diagnostics:
+                for label in sorted(getattr(gt, "_diagnostic_labels", set())):
+                    self.diagnostic_events.append({
+                        "event_type": "track_deleted",
+                        "time": float(t),
+                        "label": str(label),
+                        "assigned_global_track_id": str(gt.id),
+                    })
             self.recently_deleted.append({
                 'delete_time': t,
                 'track': gt
             })
             
-        self.recently_deleted = [rd for rd in self.recently_deleted if (t - rd['delete_time']) <= 10.0]
+        self.recently_deleted = [
+            rd for rd in self.recently_deleted
+            if (t - rd['delete_time']) <= REVIVE_WINDOW_S
+        ]
 
         self.tracks = [gt for gt in self.tracks if gt.id not in deleted_ids]
-        self.src_map = {k: v for k, v in self.src_map.items() if v not in deleted_ids}
+        self.src_map = {
+            k: v for k, v in self.src_map.items()
+            if v["global_track_id"] not in deleted_ids
+            and (t - v["last_seen_time"]) <= SOURCE_MAP_TIMEOUT_S
+        }
 
         gt_by_id = {gt.id: i for i, gt in enumerate(self.tracks)}
         matched_gt, matched_m = set(), set()
@@ -614,34 +889,48 @@ class FusionCenterIMM3:
 
         # Adım 1: Mevcut aktif trackler ile yeni ölçümleri eşleştir (Ayrık Mahalanobis)
         for mi, m in enumerate(measurements):
-            gid = self.src_map.get(m["src"])
+            gid = self._source_track_id(m["src"], t)
             if gid is None or gid not in gt_by_id:
                 continue
             gi = gt_by_id[gid]
             if gi in matched_gt:
                 continue
             gt = self.tracks[gi]
+            batch_diag[mi]["source_map_track_id"] = str(gt.id)
             S = H_MEAS_9D @ gt.cov @ H_MEAS_9D.T + m["cov"]
             diff = H_MEAS_9D @ gt.state - m["state"]
             try:
                 dom = gt.dominant_model()
-                mult = 2.0 if any(k in dom for k in ["CA", "CT_LEFT", "CT_RIGHT"]) else 1.0
+                mult = MANEUVER_GATE_MULTIPLIER if any(k in dom for k in ["CA", "CT_LEFT", "CT_RIGHT"]) else 1.0
                 gate_xy = GATE_CHI2_4DOF * mult
                 gate_z = GATE_CHI2_2DOF * mult
 
                 S_xy = S[np.ix_(idx_xy, idx_xy)]
                 diff_xy = diff[idx_xy]
-                d2_xy = float((diff_xy.T @ np.linalg.inv(S_xy) @ diff_xy).item())
+                d2_xy = _mahalanobis_squared(diff_xy, S_xy)
 
                 S_z = S[np.ix_(idx_z, idx_z)]
                 diff_z = diff[idx_z]
-                d2_z = float((diff_z.T @ np.linalg.inv(S_z) @ diff_z).item())
+                d2_z = _mahalanobis_squared(diff_z, S_z)
+
+                batch_diag[mi].update({
+                    "source_d2_xy": float(d2_xy),
+                    "source_gate_xy": float(gate_xy),
+                    "source_d2_z": float(d2_z),
+                    "source_gate_z": float(gate_z),
+                    "source_xy_rejected": bool(d2_xy >= gate_xy),
+                    "source_z_rejected": bool(d2_z >= gate_z),
+                })
 
                 if d2_xy < gate_xy and d2_z < gate_z:
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
-                    self.src_map[m["src"]] = gt.id
+                    gt._diagnostic_labels = getattr(gt, "_diagnostic_labels", set())
+                    gt._diagnostic_labels.add(str(m.get("diagnostic_label", "")))
+                    self._remember_source(m["src"], gt.id, t)
                     matched_gt.add(gi)
                     matched_m.add(mi)
+                    batch_diag[mi]["accepted_stage"] = "source_map"
+                    batch_diag[mi]["assigned_global_track_id"] = str(gt.id)
             except np.linalg.LinAlgError:
                 continue
 
@@ -659,21 +948,19 @@ class FusionCenterIMM3:
                     try:
                         S_xy = S[np.ix_(idx_xy, idx_xy)]
                         diff_xy = diff[idx_xy]
-                        d2_xy = float((diff_xy.T @ np.linalg.inv(S_xy) @ diff_xy).item())
-                        _, ld_xy = np.linalg.slogdet(S_xy)
+                        d2_xy = _mahalanobis_squared(diff_xy, S_xy)
 
                         S_z = S[np.ix_(idx_z, idx_z)]
                         diff_z = diff[idx_z]
-                        d2_z = float((diff_z.T @ np.linalg.inv(S_z) @ diff_z).item())
-                        _, ld_z = np.linalg.slogdet(S_z)
+                        d2_z = _mahalanobis_squared(diff_z, S_z)
 
                         dom = gt.dominant_model()
-                        mult = 2.0 if any(k in dom for k in ["CA", "CT_LEFT", "CT_RIGHT"]) else 1.0
+                        mult = MANEUVER_GATE_MULTIPLIER if any(k in dom for k in ["CA", "CT_LEFT", "CT_RIGHT"]) else 1.0
                         gate_xy = GATE_CHI2_4DOF * mult
                         gate_z = GATE_CHI2_2DOF * mult
 
                         if d2_xy < gate_xy and d2_z < gate_z:
-                            cost[ri, ci] = d2_xy + d2_z + max(0, ld_xy) + max(0, ld_z)
+                            cost[ri, ci] = d2_xy + d2_z
                     except np.linalg.LinAlgError:
                         pass
             if not np.all(cost == 1e9):
@@ -684,9 +971,13 @@ class FusionCenterIMM3:
                     gt = self.tracks[gi]
                     m = measurements[mi]
                     gt.update(m["state"], m["cov"], m["tq"], m["src"])
-                    self.src_map[m["src"]] = gt.id
+                    gt._diagnostic_labels = getattr(gt, "_diagnostic_labels", set())
+                    gt._diagnostic_labels.add(str(m.get("diagnostic_label", "")))
+                    self._remember_source(m["src"], gt.id, t)
                     matched_gt.add(gi)
                     matched_m.add(mi)
+                    batch_diag[mi]["accepted_stage"] = "hungarian"
+                    batch_diag[mi]["assigned_global_track_id"] = str(gt.id)
 
         # Adım 3: Hiçbir aktif track'e atanamayan ölçümler için (Revive veya Create)
         for mi, m in enumerate(measurements):
@@ -719,8 +1010,21 @@ class FusionCenterIMM3:
                 dvy = float(old_gt.state[4, 0]) - float(m["state"][3, 0])
                 dvz = float(old_gt.state[7, 0]) - float(m["state"][5, 0])
                 vel_diff = math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz)
-                
-                if dist_xy < (DUPLICATE_DIST_XY_M * 2.0) and dist_z < (DUPLICATE_DIST_Z_M * 2.0) and vel_diff <= (DUPLICATE_VEL_MPS * 1.5):
+
+                position_diff = np.array([[ddx], [ddy], [ddz]])
+                position_cov = (
+                    old_gt.cov[np.ix_([0, 3, 6], [0, 3, 6])]
+                    + m["cov"][np.ix_([0, 2, 4], [0, 2, 4])]
+                )
+                revive_d2 = _mahalanobis_squared(position_diff, position_cov)
+
+                if (
+                    dt_gap <= REVIVE_WINDOW_S
+                    and dist_xy < REVIVE_DIST_XY_M
+                    and dist_z < REVIVE_DIST_Z_M
+                    and vel_diff <= REVIVE_VEL_MPS
+                    and revive_d2 < float(chi2.ppf(GATE_CONFIDENCE, df=3))
+                ):
                     if dist_xy < best_dist_xy:
                         best_dist_xy = dist_xy
                         best_rd_idx = idx
@@ -731,17 +1035,31 @@ class FusionCenterIMM3:
                 revived_gt.propagate(t)
                 
                 revived_gt.status = "TENTATIVE" 
-                revived_gt.existence_prob = 0.5 + 0.45 * ((m["tq"] - TQ_MIN) / (TQ_MAX - TQ_MIN))
+                revived_gt.existence_prob = max(0.4, revived_gt.existence_prob * 0.8)
                 revived_gt.update(m["state"], m["cov"], m["tq"], m["src"])
+                revived_gt._diagnostic_labels = getattr(revived_gt, "_diagnostic_labels", set())
+                revived_gt._diagnostic_labels.add(str(m.get("diagnostic_label", "")))
                 
                 self.tracks.append(revived_gt)
-                self.src_map[m["src"]] = revived_gt.id
+                self._remember_source(m["src"], revived_gt.id, t)
+                batch_diag[mi]["accepted_stage"] = "revive"
+                batch_diag[mi]["assigned_global_track_id"] = str(revived_gt.id)
+                batch_diag[mi]["revived"] = True
             else:
-                ng = GlobalTrackIMM3(t, m["state"], m["cov"], m["tq"], m["src"], use_ci=self.use_ci)
+                ng = GlobalTrackIMM3(
+                    t, m["state"], m["cov"], m["tq"], m["src"],
+                    use_ci=self.use_ci, debug=self.debug,
+                )
                 self.tracks.append(ng)
-                self.src_map[m["src"]] = ng.id
+                ng._diagnostic_labels = {str(m.get("diagnostic_label", ""))}
+                self._remember_source(m["src"], ng.id, t)
+                batch_diag[mi]["accepted_stage"] = "create"
+                batch_diag[mi]["assigned_global_track_id"] = str(ng.id)
+                batch_diag[mi]["created"] = True
 
         self._merge_duplicates(t)
+        if self.collect_diagnostics:
+            self.diagnostic_events.extend(batch_diag)
 
 # ===========================================================================
 # ANA YURUTME
@@ -752,20 +1070,34 @@ def run_imm3_fusion(
     verbose=True,
     use_ci=True,
     include_source_measurement_details=False,
+    *,
+    include_debug_fields=False,
+    diagnostics_csv=None,
 ) -> pd.DataFrame:
     if verbose:
-        mode_str = "DECOUPLED DUAL-IMM + Covariance Intersection" if use_ci else "DECOUPLED DUAL-IMM + Standard LMMSE"
+        mode_str = (
+            "DECOUPLED DUAL-IMM + Kalman measurement update "
+            "(CI correlated track fusion için hazır)"
+        )
         print(f"{mode_str} fuzyon calistiriliyor: {sensor_csv}")
 
     sensor_df = pd.read_csv(sensor_csv)
-    if "is_clutter" in sensor_df.columns:
-        sensor_df = sensor_df[sensor_df["is_clutter"] != True]
+    # ``is_clutter`` is simulation ground-truth metadata, not an observable
+    # radar feature.  Using it here would give IMM an unfair oracle advantage.
 
     GlobalTrackIMM3._cnt = 0
-    fc = FusionCenterIMM3(use_ci=use_ci, verbose=verbose)
+    fc = FusionCenterIMM3(
+        use_ci=use_ci,
+        verbose=verbose,
+        debug=include_debug_fields,
+        collect_diagnostics=diagnostics_csv is not None,
+    )
     output_records = []
 
     for t_val, group in sensor_df.groupby("time", sort=True):
+        if not math.isfinite(float(t_val)):
+            warnings.warn("NaN/inf zaman damgalı ölçüm grubu atlandı")
+            continue
         measurements = []
         for _, row in group.iterrows():
             z_val = row.get("z", np.nan)
@@ -781,13 +1113,20 @@ def run_imm3_fusion(
             ]).reshape(6, 1)
             
             cov = measurement_cov_from_row(row)
-            tq = row.get("track_quality", TQ_MAX)
+            tq = float(row.get("track_quality", TQ_MAX))
+            if not math.isfinite(tq):
+                tq = TQ_MAX
+            tq = float(np.clip(tq, TQ_MIN, TQ_MAX))
+            if not _validate_measurement(state, cov):
+                warnings.warn("NaN/inf state veya geçersiz covariance içeren ölçüm atlandı")
+                continue
             
             measurements.append({
                 "state": state,
                 "cov": cov,
                 "tq": tq,
                 "src": (row["sensor"], row["local_track_id"]),
+                "diagnostic_label": row.get("callsign_true", ""),
             })
         fc.process_batch(t_val, measurements)
 
@@ -834,22 +1173,35 @@ def run_imm3_fusion(
                 "dominant_model": gt.dominant_model(),
                 "n_sources": len(gt.source_radar_names),
                 "source_radars": source_names,
+                "update_used": bool(math.isclose(float(gt.last_update), float(t_val), abs_tol=1e-9)),
+                "is_prediction_only": not bool(math.isclose(float(gt.last_update), float(t_val), abs_tol=1e-9)),
+                "time_since_update_s": max(0.0, float(t_val) - float(gt.last_update)),
             }
             if include_source_measurement_details:
                 rec["source_measurement_details"] = "; ".join(sorted(gt.source_measurement_details))
+            if include_debug_fields:
+                rec.update(gt.covariance_debug_fields())
             output_records.append(rec)
 
-    fused_df = pd.DataFrame(output_records)
+    output_columns = OUTPUT_COLUMNS.copy()
+    if include_source_measurement_details:
+        output_columns.append("source_measurement_details")
+    if include_debug_fields:
+        output_columns.extend(DEBUG_OUTPUT_COLUMNS)
+    fused_df = pd.DataFrame(output_records, columns=output_columns)
     fused_df.to_csv(output_csv, index=False)
 
     if verbose:
         if not fused_df.empty:
             print(f"IMM3 fuzyonu tamamlandi. {len(fused_df)} CONFIRMED kayit bulundu.")
-            cols = ["time", "global_track_id", "x", "y", "z", "mode_prob_ca_high", "dominant_model"]
+            cols = ["time", "global_track_id", "x", "y", "z", "mode_prob_xy_ca", "dominant_model"]
             print(fused_df[cols].tail(10).to_string(index=False))
         else:
             print(f"[!] Hic CONFIRMED track olusamadi. Bos CSV olusturuldu: {output_csv}")
         print(f"Cikti dosyasi: {output_csv}")
+
+    if diagnostics_csv is not None:
+        pd.DataFrame(fc.diagnostic_events).to_csv(diagnostics_csv, index=False)
 
     return fused_df
 
@@ -859,6 +1211,9 @@ def run_imm_fusion(
     verbose=True,
     use_ci=True,
     include_source_measurement_details=False,
+    *,
+    include_debug_fields=False,
+    diagnostics_csv=None,
 ) -> pd.DataFrame:
     return run_imm3_fusion(
         sensor_csv=sensor_csv,
@@ -866,6 +1221,8 @@ def run_imm_fusion(
         verbose=verbose,
         use_ci=use_ci,
         include_source_measurement_details=include_source_measurement_details,
+        include_debug_fields=include_debug_fields,
+        diagnostics_csv=diagnostics_csv,
     )
 
 if __name__ == "__main__":
