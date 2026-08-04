@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 
 from fusion_evaluation import compute_tracking_metrics
-from main import load_stonesoup_data, run_stonesoup_benchmark
+from stonesoup_benchmark import load_stonesoup_data, run_stonesoup_benchmark
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent

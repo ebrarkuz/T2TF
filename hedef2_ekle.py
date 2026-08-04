@@ -98,201 +98,30 @@ df3[["lat", "lon"]] = df3.apply(
 
 # ============================================================
 # 4. Dördüncü uçak
-# Fiziksel olarak daha gerçekçi agresif manevralı rota
-# Coordinated Turn benzeri model
+# Keskin ve agresif manevralı rota
 # ============================================================
 
 df4 = df1.copy()
 df4["callsign"] = "HEDEF_4"
 
-times = df4["time"].to_numpy(dtype=float)
+# Hedef 4 diğerlerinden ayrılsın diye X'te aynalanmış uçsun,
+# Y'de ise çok sert S manevraları çizsin
+T_boleni_sharp = 50.0
+Genlik_sharp = 15000.0
 
-# Başlangıç konumu:
-# Hedef 2 gibi X ekseninde aynalanmış başlasın
-x0 = float(
-    merkez_x
-    - (df1["x"].iloc[0] - merkez_x)
+df4["x"] = merkez_x - (df1["x"] - merkez_x)
+df4["vx"] = -df1["vx"]
+
+df4["y"] = (
+    df1["y"]
+    + np.sin(t_norm / T_boleni_sharp) * Genlik_sharp
 )
 
-y0 = float(df1["y"].iloc[0])
-
-# Başlangıç hızını mevcut veriden türet
-vx0 = -float(df1["vx"].iloc[0])
-vy0 = float(df1["vy"].iloc[0])
-
-initial_speed = np.hypot(vx0, vy0)
-
-# Çok düşük / çok yüksek ise sınırla
-initial_speed = np.clip(
-    initial_speed,
-    180.0,
-    300.0
+df4["vy"] = (
+    df1["vy"]
+    + np.cos(t_norm / T_boleni_sharp)
+    * (Genlik_sharp / T_boleni_sharp)
 )
-
-initial_heading = np.arctan2(
-    vy0,
-    vx0
-)
-
-
-# ------------------------------------------------------------
-# MANEVRA PARAMETRELERİ
-# ------------------------------------------------------------
-
-# Modern yüksek performanslı uçak için agresif fakat makul
-MAX_TURN_RATE_DEG_S = 8.0
-
-MAX_TURN_RATE_RAD_S = np.deg2rad(
-    MAX_TURN_RATE_DEG_S
-)
-
-# Turn-rate'in yumuşak ama belirgin biçimde sağ-sol değişmesi
-TURN_PERIOD_S = 100.0
-
-# Hızın küçük miktarda değişmesine izin ver
-BASE_SPEED_MPS = float(initial_speed)
-
-SPEED_VARIATION_MPS = 20.0
-
-SPEED_PERIOD_S = 150.0
-
-
-# ------------------------------------------------------------
-# HEDEF 4 TRAJEKTORYASINI ENTEGRE ET
-# ------------------------------------------------------------
-
-x_arr = np.zeros(len(df4))
-y_arr = np.zeros(len(df4))
-
-vx_arr = np.zeros(len(df4))
-vy_arr = np.zeros(len(df4))
-
-heading_arr = np.zeros(len(df4))
-speed_arr = np.zeros(len(df4))
-
-x_arr[0] = x0
-y_arr[0] = y0
-
-heading_arr[0] = initial_heading
-
-speed_arr[0] = BASE_SPEED_MPS
-
-vx_arr[0] = (
-    speed_arr[0]
-    * np.cos(heading_arr[0])
-)
-
-vy_arr[0] = (
-    speed_arr[0]
-    * np.sin(heading_arr[0])
-)
-
-
-for i in range(1, len(df4)):
-
-    dt = times[i] - times[i - 1]
-
-    if dt <= 0:
-        dt = 1e-3
-
-    t = times[i] - times[0]
-
-    # --------------------------------------------------------
-    # Turn rate
-    # Sağ-sol dönüşler sinüzoidal değişiyor
-    # Fakat fiziksel olarak sınırlı
-    # --------------------------------------------------------
-
-    turn_rate = (
-        MAX_TURN_RATE_RAD_S
-        * np.sin(
-            2.0 * np.pi
-            * t
-            / TURN_PERIOD_S
-        )
-    )
-
-    # Heading entegrasyonu
-    heading_arr[i] = (
-        heading_arr[i - 1]
-        + turn_rate * dt
-    )
-
-    # --------------------------------------------------------
-    # Hız büyüklüğünde küçük değişim
-    # --------------------------------------------------------
-
-    speed_arr[i] = (
-        BASE_SPEED_MPS
-        + SPEED_VARIATION_MPS
-        * np.sin(
-            2.0 * np.pi
-            * t
-            / SPEED_PERIOD_S
-        )
-    )
-
-    speed_arr[i] = np.clip(
-        speed_arr[i],
-        170.0,
-        330.0
-    )
-
-    # --------------------------------------------------------
-    # Heading + speed -> velocity
-    # --------------------------------------------------------
-
-    vx_arr[i] = (
-        speed_arr[i]
-        * np.cos(heading_arr[i])
-    )
-
-    vy_arr[i] = (
-        speed_arr[i]
-        * np.sin(heading_arr[i])
-    )
-
-    # --------------------------------------------------------
-    # Velocity -> position
-    # Trapezoidal integration
-    # --------------------------------------------------------
-
-    x_arr[i] = (
-        x_arr[i - 1]
-        + 0.5
-        * (vx_arr[i - 1] + vx_arr[i])
-        * dt
-    )
-
-    y_arr[i] = (
-        y_arr[i - 1]
-        + 0.5
-        * (vy_arr[i - 1] + vy_arr[i])
-        * dt
-    )
-
-
-# Hesaplanan trajectory'i dataframe'e aktar
-df4["x"] = x_arr
-df4["y"] = y_arr
-
-df4["vx"] = vx_arr
-df4["vy"] = vy_arr
-
-
-# ------------------------------------------------------------
-# Dikey hareketi mevcut ADS-B ground truth'tan koruyoruz
-# ------------------------------------------------------------
-
-df4["z"] = df1["z"].to_numpy()
-df4["vz"] = df1["vz"].to_numpy()
-
-df4["alt_m"] = df1["alt_m"].to_numpy()
-
-
-# ------------------------------------------------------------
-# Yeni ENU koordinatlarından lat/lon oluştur
-# ------------------------------------------------------------
 
 df4[["lat", "lon"]] = df4.apply(
     lambda row: pd.Series(
@@ -337,23 +166,4 @@ df_multi.to_csv(
 print(
     "Çoklu hedef verisi başarıyla oluşturuldu: "
     "ground_truth_adsb_multi.csv (4 Hedef)"
-)
-
-print()
-print("HEDEF_4 parametreleri:")
-print(
-    f"  Maksimum turn rate : "
-    f"{MAX_TURN_RATE_DEG_S:.1f} deg/s"
-)
-print(
-    f"  Ortalama hız       : "
-    f"{BASE_SPEED_MPS:.1f} m/s"
-)
-print(
-    f"  Hız değişimi       : "
-    f"±{SPEED_VARIATION_MPS:.1f} m/s"
-)
-print(
-    f"  Dönüş periyodu     : "
-    f"{TURN_PERIOD_S:.1f} s"
 )

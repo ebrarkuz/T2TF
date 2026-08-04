@@ -1,62 +1,65 @@
 # Radar Fusion Project
 
-## Stone Soup verisiyle karşılaştırma
+Bu proje `ground_truth_adsb_multi.csv` verisinden radar ölçümleri üretir; Basic,
+Advanced ve IMM füzyon algoritmalarını çalıştırır ve sonuçları karşılaştırır.
 
-Her iki radar simülatörü de aynı dört hedefli `ground_truth_adsb_multi.csv`
-dosyasını kullanır. `radar_measurements_stonesoup.csv`, bu ground truth'un gerçek
-Stone Soup radar ve ölçüm modellerinden geçirilmiş karşılığıdır. Üç algoritmayı
-iki radar verisi üzerinde karşılaştırmak için:
+## Ana çalışma akışı
 
-```bash
-python main.py
-```
-
-Stone Soup radar dosyasını yeniden üretmek için önce `python stone.py` çalıştırın.
-Farklı dosyalar veya eşleştirme mesafesi de seçilebilir:
-
-```bash
-python main.py --source stonesoup --gt-csv my_truth.csv --radar-csv my_radar.csv --max-match-distance 200
-```
-
-Basic, Advanced ve IMM sonuçlarının iki veri kaynağını içeren ortak tablosu
-`all_datasets_metrics.csv` olarak kaydedilir. Veri kaynağına özel raporlar
-`adsb_metrics.csv` ve `stonesoup_metrics.csv`; hedef bazlı sonuçlar da ilgili
-`*_target_metrics.csv` dosyalarıdır. İki veri kaynağının tüm hedef sonuçları
-ayrıca `all_datasets_target_metrics.csv` dosyasında birleştirilir. Kendi
-verinizdeki dört hedef için metrik tabloları terminalde ayrı ayrı gösterilir.
-`is_clutter` sadece simülasyon etiketi kabul edilir ve
-algoritmalara ön bilgi vermek için kullanılmaz. Recall ve MOTA tüm algoritmalar
-için ortak radar tarama zamanlarında hesaplanır.
-
-Yalnızca tek kaynağı çalıştırmak için `--source adsb` veya `--source stonesoup`
-seçilebilir.
-
-Proje yapısı:
-
-- `fetch_ground_truth.py`: Ground truth verisini çeken ve oluşturan kod. Bu dosyaya dokunulmadı.
-- `radar_sim.py`: Ground truth verisinden idealize ve gerçekçi radar sensör verileri üreten simülatör.
-- `fusion_basic.py`: Basit füzyon metodu.
-- `fusion_advanced.py`: Gelişmiş füzyon metodu (CI destekli).
-- `fusion_evaluation.py`: Farklı kombinasyonları karşılaştırmak için metrik hesaplama.
-- `main.py`: Grafik üretmeden, senaryoları çalıştırıp metrik tablosunu oluşturan sade ana dosya.
-- `streamlit_fusion.py`: Fused sonuçları ve sensör verilerini interaktif olarak görselleştiren Streamlit uygulaması.
-
-## Nasıl Kullanılır
-
-1. Simülasyon verisini ve radar çıktısını üretmek için:
+Mevcut `radar_sensor_tracks_gercekci.csv` dosyasını kullanmak için:
 
 ```bash
 python main.py
 ```
 
-2. Streamlit ile görselleştirmek için:
+Radar ölçümlerini önce güncel ground truth'tan yeniden üretmek için:
+
+```bash
+python main.py --regenerate-adsb
+```
+
+`main.py` yalnızca şu ADS-B tabanlı girdileri kullanır:
+
+- `ground_truth_adsb_multi.csv`
+- `radar_sensor_tracks_gercekci.csv`
+
+Başlıca çıktılar:
+
+- `res_real_basic.csv`
+- `res_real_adv.csv`
+- `res_real_imm.csv`
+- `adsb_metrics.csv`
+- `adsb_target_metrics.csv`
+
+Eşleştirme mesafesi değiştirilebilir:
+
+```bash
+python main.py --max-match-distance 750
+```
+
+## Görselleştirme
 
 ```bash
 streamlit run streamlit_fusion.py
 ```
 
-## Notlar
+## İsteğe bağlı Stone Soup akışı
 
-- `main.py` sadece metrik tablosu oluşturur; grafik üretmez.
-- `streamlit_fusion.py` harita ve interaktif görselleştirme için ayrılmıştır.
-- Aşağıdaki eski çıktı dosyaları ve görseller proje kökünden temizlendi.
+Stone Soup ana çalışma akışından ayrılmıştır. Özellikle ihtiyaç duyulursa:
+
+```bash
+python stone.py
+python stonesoup_benchmark.py
+```
+
+Bu komutlar `main.py` tarafından otomatik olarak çalıştırılmaz.
+
+## Proje yapısı
+
+- `radar_sim.py`: Ground truth'tan idealize ve gerçekçi radar verisi üretir.
+- `fusion_basic.py`: Sabit hızlı Basic füzyon algoritmasıdır.
+- `fusion_advanced.py`: Sabit ivmeli ve CI destekli Advanced algoritmadır.
+- `fusion_imm.py`: IMM tabanlı füzyon algoritmasıdır.
+- `fusion_evaluation.py`: Performans metriklerini hesaplar.
+- `main.py`: Yalnızca ADS-B tabanlı ana benchmark akışıdır.
+- `stonesoup_benchmark.py`: İsteğe bağlı, bağımsız Stone Soup benchmark akışıdır.
+- `streamlit_fusion.py`: Sonuçları interaktif olarak görselleştirir.

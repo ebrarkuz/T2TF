@@ -54,9 +54,19 @@ def enu_to_latlon(x: float, y: float, ref_lat: float, ref_lon: float) -> tuple[f
 # ===========================================================================
 # THREE.JS 3D INSPECTOR (DEĞİŞMEDİ - AYNEN KORUNDU)
 # ===========================================================================
-def build_threejs_html(gt_df: pd.DataFrame, fused_df: pd.DataFrame) -> str:
-    gt_csv_string = gt_df.to_csv(index=False)
-    fused_csv_string = fused_df.to_csv(index=False)
+def build_threejs_html(gt_df, fused_df):
+    gt_cols = ["time", "callsign", "x", "y", "z"]
+    fused_cols = ["time", "global_track_id", "x", "y", "z"]
+
+    gt_csv_string = gt_df[
+        [c for c in gt_cols if c in gt_df.columns]
+    ].to_csv(index=False)
+
+    fused_csv_string = fused_df[
+        [c for c in fused_cols if c in fused_df.columns]
+    ].to_csv(index=False)
+
+    # HTML oluşturma işlemi...
 
     html_template = """
     <!DOCTYPE html>
