@@ -1,17 +1,21 @@
 # Sensor Fusion Realtime
 
-Gerçek radar track ölçümlerini JSON/UDP üzerinden alan, seçilebilir bir füzyon algoritmasıyla işleyen, fused track JSON mesajlarını yayımlayan ve basit bir 2B haritada gösteren ürün prototipi.
+Gerçek radar track ölçümlerini JSON/UDP üzerinden alan, seçilebilir füzyon algoritmasıyla işleyen ve tarayıcı gerektirmeyen yerel 2B masaüstü takip ekranında gösteren ürün prototipi.
 
 ## Mimari
 
 ```text
 Radar JSON -> UDP 7777 -> doğrulama -> seçilebilir füzyon
-                                      |
-                                      +-> UDP 8888 fused JSON
-                                      +-> atomik state snapshot -> Streamlit 2B harita
+                                      |-- UDP 8888: yalnız fused_track
+                                      `-- UDP 8890: görsel telemetri
+                                                     radar_measurement
+                                                     fused_track
+                                                     runtime_status
+
+PySide6 masaüstü uygulaması <- UDP 8890
 ```
 
-Araştırma/benchmark ve veri üretimi bileşenleri bu pakette yoktur.
+Masaüstü uygulaması füzyon servisinden ayrı süreçtir. Pencerenin kapanması UDP 7777 receiver'ını, filtre state'ini veya UDP 8888 yayınını durdurmaz. `8888` sözleşmesi değişmemiştir; harici tüketiciler yalnız `fused_track` almaya devam eder.
 
 ## Kurulum
 
@@ -35,30 +39,34 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Test edilen ortam: Python 3.14, NumPy 2.5, pandas 3.0, SciPy 1.18, Streamlit 1.58, Plotly 6.8 ve PyYAML 6.0.
+Doğrulanan ortam: Python 3.14, NumPy 2.5, pandas 3.0, SciPy 1.18, PyYAML 6.0, PySide6 6.11 ve pyqtgraph 0.14.
 
 ## Konfigürasyon
 
-Tüm varsayılanlar [config/default.yaml](config/default.yaml) dosyasındadır. `fusion.algorithm` şu değerlerden biri olabilir:
+Varsayılanlar [config/default.yaml](config/default.yaml) dosyasındadır. Algoritma:
 
-- `basic_cv`: 6 durumlu sabit hız track-to-track füzyonu
-- `advanced_ca`: 9 durumlu sabit ivme füzyonu; adaptive Q açılıp kapatılabilir
-- `dual_imm`: XY için CV/CA/CT, Z için CV/Singer kullanan ayrık Dual-IMM
-
-Her algoritmanın gerçek kod sabitleri `fusion.profiles.<algoritma>` altında bulunur. Algoritmayı değiştirmek için `fusion.algorithm` değerini düzenleyin; seçilen profile otomatik geçilir. Bilinmeyen parametreler sessizce yok sayılmaz, başlangıçta hata verir.
-
-Desteklenen environment override örnekleri:
-
-```powershell
-$env:FUSION_ALGORITHM="advanced_ca"
-$env:RADAR_UDP_PORT="7777"
-$env:FUSED_UDP_PORT="8888"
-python -m realtime.fusion_runtime
+```yaml
+fusion:
+  algorithm: dual_imm  # basic_cv | advanced_ca | dual_imm
 ```
 
-Farklı YAML için `python -m realtime.fusion_runtime --config config/my.yaml` veya `FUSION_CONFIG` kullanılabilir.
+Gerçek algoritma parametreleri `fusion.profiles.<algoritma>` altındadır. Değişiklikler fusion runtime yeniden başlatıldığında uygulanır; çalışan filtre state'i sessizce değiştirilmez. Bilinmeyen parametreler başlangıçta hata verir.
 
-## Radar JSON şeması
+Telemetri ve görselleştirme:
+
+```yaml
+visualization:
+  telemetry_host: "127.0.0.1"
+  telemetry_port: 8890
+  max_visible_radar_measurements: 20
+  max_fused_points_per_track: 500
+  refresh_interval_ms: 250
+  max_line_gap_s: 1.0
+```
+
+`RADAR_UDP_PORT`, `FUSED_UDP_PORT`, `TELEMETRY_UDP_PORT`, `FUSION_ALGORITHM` ve `FUSION_CONFIG` environment override olarak kullanılabilir.
+
+## Radar JSON
 
 ```json
 {
@@ -76,9 +84,9 @@ Farklı YAML için `python -m realtime.fusion_runtime --config config/my.yaml` v
 }
 ```
 
-`covariance`, verildiğinde `[x,vx,y,vy,z,vz]` sıralı 6x6 matristir. Geçersiz sürüm, tip, frame, JSON, eski/sırası bozuk veya duplicate paket servis durmadan reddedilir.
+`covariance`, verildiğinde `[x,vx,y,vy,z,vz]` sıralı 6x6 matristir. Geçersiz, duplicate, eski veya sırası bozuk mesajlar servisi çökertmeden reddedilir.
 
-## Fused JSON şeması
+## Fused JSON
 
 ```json
 {
@@ -88,14 +96,12 @@ Farklı YAML için `python -m realtime.fusion_runtime --config config/my.yaml` v
   "state_timestamp": 1760000000.125,
   "track_id": "GT-0001",
   "track_status": "tentative",
-  "coordinate_frame": "ENU",
   "position": {"x_m": 1000.0, "y_m": 500.0, "z_m": 3000.0},
   "velocity": {"vx_mps": 50.0, "vy_mps": 10.0, "vz_mps": 2.0},
   "fusion_metadata": {
     "update_type": "measurement_update",
     "filter_name": "Dual-IMM",
     "dominant_model": "XY:CV|Z:CV",
-    "model_probabilities": {"CV": 0.7, "CA": 0.1, "CT": 0.2},
     "used_measurements": [{
       "measurement_id": "radar_000001",
       "sensor_id": "RADAR_A",
@@ -106,61 +112,86 @@ Farklı YAML için `python -m realtime.fusion_runtime --config config/my.yaml` v
 }
 ```
 
-`used_measurements` association anında kaydedilir; sonradan konum yakınlığından tahmin edilmez.
+`used_measurements` association sırasında kaydedilir; sonradan mesafeden tahmin edilmez.
 
 ## Çalıştırma
 
-Terminal 1 — servis:
+Terminal 1 — füzyon servisi:
 
 ```bash
 python -m realtime.fusion_runtime
 ```
 
-Terminal 2 — 2B harita:
+Terminal 2 — lokal masaüstü takip ekranı:
 
 ```bash
-streamlit run visualization/realtime_map.py
+python -m visualization.desktop_app
 ```
 
-Terminal 3 — CSV replay (`--speed 0` beklemeden, `--speed 2.0` iki kat hızlı, `--loop` sürekli):
+Terminal 3 — CSV replay:
 
 ```bash
 python tools/radar_udp_replay.py --input data/radar_sensor_tracks_gercekci.csv --host 127.0.0.1 --port 7777 --speed 1.0
 ```
 
-Terminal 4 — fused listener:
+`--speed 0` beklemeden, `--speed 2.0` iki kat hızlı, `--loop` sürekli replay yapar.
+
+Terminal 4 — isteğe bağlı fused listener:
 
 ```bash
 python tools/fused_udp_listener.py --host 0.0.0.0 --port 8888
 ```
 
-Harita varsayılan olarak ground truth çizgilerini, son 20 radar noktasını, fused track çizgilerini ve güncel track marker'larını gösterir. Radar limiti 10/20/50/100 seçilebilir; track geçmişleri birbirine bağlanmaz.
+## Masaüstü ekranı
+
+PySide6 UI ana thread'de çalışır. UDP 8890 socket'i ayrı `QThread` içindeki worker tarafından okunur; Qt signal/slot ile doğrulanmış mesajlar bounded `DesktopState` deposuna aktarılır. `QTimer`, yapılandırılabilir aralıkta çizimi yeniler; her UDP mesajında repaint yapılmaz.
+
+- Ground truth rotaları bir kez yüklenir ve çizgi olarak tutulur.
+- Radar geçmişi varsayılan `deque(maxlen=20)` kullanır; 10/20/50/100 seçilebilir.
+- Her track kendi bounded geçmişinde ve kendi kalıcı `PlotDataItem` nesnesinde tutulur.
+- Büyük zaman boşluklarında çizgiye `NaN` ayracı eklenir; yapay bağlantı çizilmez.
+- Radar tek bir `ScatterPlotItem` ile gösterilir.
+- Track marker ve etiketleri yeniden kullanılır.
+- Hover, mouse'a 14 piksel içindeki en yakın görünür noktayı bulup tek detay panelini günceller.
+- Pause yalnız çizimi durdurur; UDP worker veri almaya devam eder.
+- Geçmişi temizleme yalnız lokal çizim tamponunu temizler, füzyonu sıfırlamaz.
+
+Ground truth bulunamazsa uygulama uyarı gösterir ve canlı telemetriyle çalışmayı sürdürür.
 
 ## Paket verileri
 
-`data/ground_truth_adsb_multi.csv` gerçek kolonları: `time,x,y,z,vx,vy,vz,callsign,lat,lon,alt_m,time_unix,target_id,target_name,speed,heading,turn_rate,climb_rate,spiral_center_x_m,spiral_center_y_m,spiral_radius_m,spiral_theta_rad`.
+`data/ground_truth_adsb_multi.csv`: `time,x,y,z,vx,vy,vz,callsign,lat,lon,alt_m,time_unix,target_id,target_name,speed,heading,turn_rate,climb_rate,spiral_center_x_m,spiral_center_y_m,spiral_radius_m,spiral_theta_rad`.
 
-`data/radar_sensor_tracks_gercekci.csv` gerçek kolonları: `time,sensor,local_track_id,callsign_true,x,y,z,vx,vy,vz,track_quality,sigma_pos_m,sigma_vel_mps,is_clutter`. `callsign_true` ve `is_clutter` simülasyon değerlendirme etiketleridir; füzyon kararı bunları kullanmaz.
+`data/radar_sensor_tracks_gercekci.csv`: `time,sensor,local_track_id,callsign_true,x,y,z,vx,vy,vz,track_quality,sigma_pos_m,sigma_vel_mps,is_clutter`. Değerlendirme etiketleri füzyon kararında kullanılmaz.
 
 ## Testler
 
 ```bash
 python -m unittest discover -s tests -v
 python -m realtime.fusion_runtime --help
+python -m visualization.desktop_app --help
 python tools/radar_udp_replay.py --help
 python tools/fused_udp_listener.py --help
 ```
 
-Testler şema/duplicate kontrolü, üç algoritmanın factory üzerinden seçimi, YAML/env config, replay dönüşümü, UDP uçtan uca akış, measurement kimliği, kapanış ve görsel tampon ayrımını kapsar.
+Qt smoke testi `QT_QPA_PLATFORM=offscreen` ile gerçek ekran gerektirmeden pencere başlangıcı ve worker kapanışını doğrular.
 
-## Gerçek radar entegrasyonu
+## Windows EXE paketleme
 
-Radar gateway'i her track update için epoch saniye cinsinden `timestamp`, sensor bazında artan `sequence_number`, kalıcı `source_track_id` ve ENU Kartezyen durum üretmelidir. Ölçüm kovaryansı bilinmiyorsa `track_quality`, `sigma_pos_m` ve `sigma_vel_mps` kullanılabilir. UDP paket boyutu 65.507 byte'ı aşmamalıdır.
+PyInstaller çalışma zamanı için zorunlu değildir ve ana requirements dosyasına eklenmemiştir. İsteğe bağlı kurulumdan sonra:
+
+```powershell
+pip install pyinstaller
+pyinstaller --name sensor-fusion-viewer --windowed visualization/desktop_app.py
+```
+
+Üretilen `dist/` ve `build/` çıktıları Git deposuna eklenmemelidir.
 
 ## Bilinen sınırlamalar
 
-- Teslimat UDP olduğu için kayıp ve yeniden sıralama olabilir; uygulama duplicate/eski paketleri filtreler fakat yeniden iletim yapmaz.
-- Yalnız ENU Kartezyen giriş desteklenir. Polar ölçüm için radar poz/oryantasyon kalibrasyonu bu pakete eklenmemiştir.
-- Runtime tek worker ile sıralı işler; çok yüksek trafik için yatay ölçekleme veya broker gerekir.
-- Snapshot dosyası tek makinedeki Streamlit arayüzü içindir; dağıtık kurulumda harici state katmanı gerekir.
-- LICENSE varsayılan olarak kapalı/proprietary'dir; açık kaynak dağıtımı için proje sahibi uygun lisansla değiştirmelidir.
+- UDP teslimatı kayıpsız değildir ve yeniden iletim yapmaz.
+- Yalnız ENU Kartezyen giriş desteklenir; polar giriş için radar poz/oryantasyon kalibrasyonu gerekir.
+- Tek telemetri UDP portunu aynı makinede aynı anda yalnız bir masaüstü uygulaması bind edebilir. Çoklu tüketici için multicast veya broker gerekir.
+- Çok yüksek track/nokta sayısında nearest-point hover taraması ek uzamsal indeks gerektirebilir.
+- Runtime tek worker ile sıralı işler.
+- LICENSE varsayılan olarak kapalı/proprietary'dir.

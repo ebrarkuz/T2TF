@@ -46,13 +46,14 @@ fusion:
       REVIVE_WINDOW_S: 10.0
 
 visualization:
+  telemetry_host: "127.0.0.1"
+  telemetry_port: 8890
   max_visible_radar_measurements: 20
   max_fused_points_per_track: 500
   refresh_interval_ms: 250
   max_line_gap_s: 1.0
 
 runtime:
-  state_snapshot: "runtime/realtime_state.json"
   radar_queue_maxsize: 1000
   fused_queue_maxsize: 1000
   max_packet_age_s: 2.0

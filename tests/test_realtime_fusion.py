@@ -1,7 +1,5 @@
 import time
 import unittest
-from pathlib import Path
-
 from realtime.fusion_runtime import FusionRuntime
 from realtime.message_schema import encode_message, validate_fused_message
 from realtime.runtime_config import RuntimeConfig
@@ -10,21 +8,18 @@ from tests.test_message_schema import radar_message
 
 class RealtimeFusionTests(unittest.TestCase):
     def setUp(self):
-        self.snapshot_path = Path.cwd() / ".test_realtime_fusion_state.json"
         self.runtime = FusionRuntime(RuntimeConfig(
             radar_udp_host="127.0.0.1",
             radar_udp_port=0,
             fused_udp_host="127.0.0.1",
             fused_udp_port=9,
-            state_snapshot_path=str(self.snapshot_path),
             max_packet_age_s=10.0,
         ))
         self.runtime.started_at = time.time()
 
     def tearDown(self):
         self.runtime.publisher.close()
-        self.snapshot_path.unlink(missing_ok=True)
-        self.snapshot_path.with_suffix(self.snapshot_path.suffix + ".tmp").unlink(missing_ok=True)
+        self.runtime.telemetry_publisher.close()
 
     def test_measurement_identity_is_stored_during_fusion(self):
         now = time.time()

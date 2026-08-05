@@ -1,8 +1,6 @@
 import socket
 import time
 import unittest
-from pathlib import Path
-
 from realtime.fusion_runtime import FusionRuntime
 from realtime.message_schema import decode_json_packet, encode_message, validate_fused_message
 from realtime.runtime_config import RuntimeConfig
@@ -15,12 +13,15 @@ class UdpPipelineTests(unittest.TestCase):
         listener.bind(("127.0.0.1", 0))
         listener.settimeout(5.0)
         fused_port = listener.getsockname()[1]
-        snapshot_path = Path.cwd() / ".test_udp_pipeline_state.json"
+        telemetry_listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        telemetry_listener.bind(("127.0.0.1", 0))
+        telemetry_listener.settimeout(5.0)
+        telemetry_port = telemetry_listener.getsockname()[1]
         try:
             service = FusionRuntime(RuntimeConfig(
                 radar_udp_host="127.0.0.1", radar_udp_port=0,
                 fused_udp_host="127.0.0.1", fused_udp_port=fused_port,
-                state_snapshot_path=str(snapshot_path),
+                telemetry_udp_host="127.0.0.1", telemetry_udp_port=telemetry_port,
                 max_packet_age_s=10.0,
             ))
             service.start()
@@ -37,13 +38,18 @@ class UdpPipelineTests(unittest.TestCase):
                 "udp-e2e-1",
             )
             self.assertTrue(str(fused["track_id"]).startswith("GT-"))
+            telemetry_types = set()
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not {"radar_measurement", "fused_track"}.issubset(telemetry_types):
+                telemetry_payload, _ = telemetry_listener.recvfrom(65508)
+                telemetry_types.add(decode_json_packet(telemetry_payload)["message_type"])
+            self.assertTrue({"radar_measurement", "fused_track"}.issubset(telemetry_types))
             sender.close()
             service.stop()
             self.assertFalse(service.worker.is_alive())
             self.assertFalse(service.receiver.thread.is_alive())
         finally:
-            snapshot_path.unlink(missing_ok=True)
-            snapshot_path.with_suffix(snapshot_path.suffix + ".tmp").unlink(missing_ok=True)
+            telemetry_listener.close()
         listener.close()
 
 

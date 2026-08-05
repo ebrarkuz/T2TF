@@ -24,11 +24,12 @@ class RuntimeConfig:
     radar_udp_port: int = 7777
     fused_udp_host: str = "127.0.0.1"
     fused_udp_port: int = 8888
+    telemetry_udp_host: str = "127.0.0.1"
+    telemetry_udp_port: int = 8890
     fusion_algorithm: str = "dual_imm"
     fusion_parameters: dict[str, Any] = field(default_factory=dict)
     ground_truth_path: str = "data/ground_truth_adsb_multi.csv"
     example_radar_path: str = "data/radar_sensor_tracks_gercekci.csv"
-    state_snapshot_path: str = "runtime/realtime_state.json"
     max_visible_radar_measurements: int = 20
     max_fused_points_per_track: int = 500
     radar_queue_maxsize: int = 1000
@@ -60,11 +61,12 @@ class RuntimeConfig:
             radar_udp_port=int(os.getenv("RADAR_UDP_PORT", network.get("radar_port", 7777))),
             fused_udp_host=os.getenv("FUSED_UDP_HOST", str(network.get("fused_host", "127.0.0.1"))),
             fused_udp_port=int(os.getenv("FUSED_UDP_PORT", network.get("fused_port", 8888))),
+            telemetry_udp_host=os.getenv("TELEMETRY_UDP_HOST", str(visualization.get("telemetry_host", "127.0.0.1"))),
+            telemetry_udp_port=int(os.getenv("TELEMETRY_UDP_PORT", visualization.get("telemetry_port", 8890))),
             fusion_algorithm=selected_algorithm,
             fusion_parameters=dict(selected_parameters),
             ground_truth_path=os.getenv("GROUND_TRUTH_PATH", str(data.get("ground_truth_csv", "data/ground_truth_adsb_multi.csv"))),
             example_radar_path=os.getenv("EXAMPLE_RADAR_PATH", str(data.get("example_radar_csv", "data/radar_sensor_tracks_gercekci.csv"))),
-            state_snapshot_path=os.getenv("REALTIME_STATE_PATH", str(runtime.get("state_snapshot", "runtime/realtime_state.json"))),
             max_visible_radar_measurements=int(os.getenv("MAX_VISIBLE_RADAR_MEASUREMENTS", visualization.get("max_visible_radar_measurements", 20))),
             max_fused_points_per_track=int(os.getenv("MAX_FUSED_POINTS_PER_TRACK", visualization.get("max_fused_points_per_track", 500))),
             visualization_refresh_ms=int(os.getenv("VISUALIZATION_REFRESH_MS", visualization.get("refresh_interval_ms", 250))),
@@ -82,7 +84,9 @@ class RuntimeConfig:
         return cfg
 
     def validate(self) -> None:
-        if not 0 <= self.radar_udp_port <= 65535 or not 0 <= self.fused_udp_port <= 65535:
+        if not all(0 <= port <= 65535 for port in (
+            self.radar_udp_port, self.fused_udp_port, self.telemetry_udp_port
+        )):
             raise ValueError("UDP portlari 0..65535 araliginda olmali")
         for name in ("max_visible_radar_measurements", "max_fused_points_per_track",
                      "radar_queue_maxsize", "fused_queue_maxsize", "duplicate_cache_size"):
@@ -90,7 +94,3 @@ class RuntimeConfig:
                 raise ValueError(f"{name} sifirdan buyuk olmali")
         if self.queue_overflow_policy not in {"drop_oldest", "reject_new"}:
             raise ValueError("QUEUE_OVERFLOW_POLICY drop_oldest veya reject_new olmali")
-
-    @property
-    def snapshot_path(self) -> Path:
-        return Path(self.state_snapshot_path)

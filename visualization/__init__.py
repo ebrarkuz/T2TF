@@ -1,2 +1,1 @@
-"""Gerçek zamanlı görselleştirme bileşenleri."""
-
+"""Lokal PySide6 sensor fuzyon goruntuleyicisi."""

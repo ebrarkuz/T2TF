@@ -3,14 +3,15 @@ import pandas as pd
 
 from realtime.message_schema import validate_radar_message
 from tools.radar_udp_replay import row_to_message
-from visualization.realtime_map import _load_ground_truth
+from visualization.desktop_state import load_ground_truth
 
 
 class DataAndReplayTests(unittest.TestCase):
     def test_packaged_ground_truth_loads(self):
-        frame = _load_ground_truth("data/ground_truth_adsb_multi.csv")
-        self.assertFalse(frame.empty)
-        self.assertTrue({"time", "x", "y", "z"}.issubset(frame.columns))
+        ground_truth = load_ground_truth("data/ground_truth_adsb_multi.csv")
+        self.assertTrue(ground_truth.routes)
+        first_route = next(iter(ground_truth.routes.values()))
+        self.assertTrue({"time", "x", "y", "z"}.issubset(first_route[0]))
 
     def test_csv_row_converts_to_valid_json_schema(self):
         row = pd.read_csv("data/radar_sensor_tracks_gercekci.csv", nrows=1).iloc[0]

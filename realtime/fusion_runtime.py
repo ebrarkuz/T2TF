@@ -14,11 +14,10 @@ from typing import Any
 import numpy as np
 from fusion import create_fusion_algorithm
 from fusion.measurement import TQ_MAX, TQ_MIN, measurement_covariance
-from visualization.realtime_state import RealtimeMapState
-
 from .message_schema import RadarMessageValidator
 from .runtime_config import DEFAULT_CONFIG_PATH, RuntimeConfig
 from .udp_fused_publisher import UdpFusedPublisher
+from .udp_json_publisher import UdpJsonPublisher
 from .udp_radar_receiver import ReceivedDatagram, UdpRadarReceiver
 
 
@@ -59,6 +58,13 @@ class FusionRuntime:
             self.config.fused_queue_maxsize,
             self.config.queue_overflow_policy,
         )
+        self.telemetry_publisher = UdpJsonPublisher(
+            self.config.telemetry_udp_host,
+            self.config.telemetry_udp_port,
+            self.config.fused_queue_maxsize,
+            self.config.queue_overflow_policy,
+            name="visualization-telemetry",
+        )
         self.validator = RadarMessageValidator(
             duplicate_cache_size=self.config.duplicate_cache_size,
             max_packet_age_s=self.config.max_packet_age_s,
@@ -69,15 +75,11 @@ class FusionRuntime:
         self.fusion = create_fusion_algorithm(
             self.config.fusion_algorithm, self.config.fusion_parameters
         )
-        self.map_state = RealtimeMapState(
-            self.config.max_visible_radar_measurements,
-            self.config.max_fused_points_per_track,
-        )
         self.counters = RuntimeCounters()
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.started_at: float | None = None
-        self._last_snapshot_write = 0.0
+        self._last_status_publish = 0.0
         self._counter_lock = threading.RLock()
 
     def start(self) -> None:
@@ -88,6 +90,7 @@ class FusionRuntime:
         self.stop_event.clear()
         self.receiver.start()
         self.publisher.start()
+        self.telemetry_publisher.start()
         self.worker = threading.Thread(target=self._worker_loop, name="fusion-worker", daemon=True)
         self.worker.start()
         LOG.info(
@@ -104,7 +107,7 @@ class FusionRuntime:
             try:
                 datagram = self.input_queue.get(timeout=0.2)
             except queue.Empty:
-                self._write_snapshot_if_due()
+                self._publish_runtime_status_if_due()
                 continue
             try:
                 self.process_datagram(datagram.payload, datagram.received_at)
@@ -201,7 +204,7 @@ class FusionRuntime:
             with self._counter_lock:
                 self.counters.rejected_packets += 1
             LOG.warning("Radar paketi reddedildi: %s", result.reason)
-            self._update_diagnostics()
+            self._publish_runtime_status_if_due()
             return []
 
         message = result.message
@@ -232,7 +235,8 @@ class FusionRuntime:
             "association_stage": accepted_stage,
             "rejection_reason": None if assigned_track_id is not None else "association_rejected",
         })
-        self.map_state.add_radar(radar_record)
+        if publish:
+            self.telemetry_publisher.publish(radar_record)
 
         used_by_track: dict[str, list[dict[str, Any]]] = {}
         if assigned_track_id is not None:
@@ -255,12 +259,12 @@ class FusionRuntime:
             used = used_by_track.get(track["track_id"], [])
             fused_message = self._fused_message(track, message["timestamp"], used)
             fused_messages.append(fused_message)
-            self.map_state.add_fused(fused_message)
             if publish:
                 if self.publisher.publish(fused_message):
                     with self._counter_lock:
                         self.counters.published_fused_messages += 1
                         self.counters.last_fused_publish_time = fused_message["publish_timestamp"]
+                self.telemetry_publisher.publish(fused_message)
 
         latency_ms = (time.perf_counter() - started) * 1000.0
         with self._counter_lock:
@@ -269,8 +273,7 @@ class FusionRuntime:
             self.counters.max_queue_depth = max(
                 self.counters.max_queue_depth, self.input_queue.qsize()
             )
-        self._update_diagnostics()
-        self._write_snapshot_if_due()
+        self._publish_runtime_status_if_due()
         return fused_messages
 
     def _diagnostic_snapshot(self) -> dict[str, Any]:
@@ -297,6 +300,10 @@ class FusionRuntime:
             "fused_queue_depth": self.publisher.queue.qsize(),
             "fused_queue_capacity": self.config.fused_queue_maxsize,
             "fused_queue_overflow_count": self.publisher.overflow_count,
+            "telemetry_udp_host": self.config.telemetry_udp_host,
+            "telemetry_udp_port": self.config.telemetry_udp_port,
+            "telemetry_queue_depth": self.telemetry_publisher.queue.qsize(),
+            "telemetry_queue_overflow_count": self.telemetry_publisher.overflow_count,
             "average_fusion_latency_ms": (
                 counters["latency_sum_ms"] / counters["valid_packets"]
                 if counters["valid_packets"] else 0.0
@@ -304,19 +311,17 @@ class FusionRuntime:
         })
         return counters
 
-    def _update_diagnostics(self) -> None:
-        self.map_state.set_diagnostics(self._diagnostic_snapshot())
-
-    def _write_snapshot_if_due(self, force: bool = False) -> None:
+    def _publish_runtime_status_if_due(self, force: bool = False) -> None:
         now = time.monotonic()
         interval = self.config.visualization_refresh_ms / 1000.0
-        if force or now - self._last_snapshot_write >= interval:
-            self._update_diagnostics()
-            try:
-                self.map_state.write_snapshot(self.config.snapshot_path)
-                self._last_snapshot_write = now
-            except OSError:
-                LOG.exception("Görselleştirme snapshot dosyası yazılamadı")
+        if force or now - self._last_status_publish >= interval:
+            self.telemetry_publisher.publish({
+                "schema_version": 1,
+                "message_type": "runtime_status",
+                "publish_timestamp": time.time(),
+                "status": self._diagnostic_snapshot(),
+            })
+            self._last_status_publish = now
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -324,8 +329,9 @@ class FusionRuntime:
         if self.worker and self.worker.is_alive():
             self.worker.join(timeout=3.0)
         self.counters.queue_dropped_packets = self.receiver.overflow_count
-        self._write_snapshot_if_due(force=True)
+        self._publish_runtime_status_if_due(force=True)
         self.publisher.close()
+        self.telemetry_publisher.close()
         LOG.info("Füzyon servisi durduruldu: %s", self._diagnostic_snapshot())
 
 

@@ -15,6 +15,9 @@ Thumbs.db
 runtime/
 output/
 outputs/
+build/
+dist/
+*.spec
 tmp/
 tmp*/
 temp/
