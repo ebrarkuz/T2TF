@@ -1,0 +1,67 @@
+network:
+  radar_host: "0.0.0.0"
+  radar_port: 7777
+  fused_host: "127.0.0.1"
+  fused_port: 8888
+
+fusion:
+  algorithm: "dual_imm"
+  profiles:
+    basic_cv:
+      gate_threshold: 25.0
+      DUPLICATE_DIST_M: 150.0
+      DUPLICATE_VEL_MPS: 30.0
+    advanced_ca:
+      use_ci: true
+      adaptive_q_enabled: true
+      PROCESS_NOISE_INTENSITY: 1.5
+      BASE_GATE_CHI2_6DOF: 22.5
+      GATE_SCALE_MIN: 1.0
+      GATE_SCALE_MAX: 1.8
+      MAX_ASSOC_VEL_DIFF_MPS: 120.0
+      MAX_ASSOC_ACCEL_MPS2: 30.0
+      MAX_POSITION_INNOVATION_M: 750.0
+      COAST_TIME_LIMIT: 30.0
+      CONFIRM_HITS: 6
+      MIN_CONFIRM_AGE_S: 8.0
+      MIN_CONFIRM_SENSORS: 2
+    dual_imm:
+      use_ci: true
+      GATE_CHI2_4DOF: 16.014326314940615
+      GATE_CHI2_2DOF: 11.618285980628052
+      MANEUVER_GATE_MULTIPLIER: 1.4
+      CV_XY_PROCESS_NOISE_INTENSITY: 0.4
+      CA_XY_PROCESS_NOISE_INTENSITY: 8.0
+      CT_XY_PROCESS_NOISE_INTENSITY: 2.0
+      CV_Z_PROCESS_NOISE_INTENSITY: 0.2
+      SINGER_TAU_Z: 10.0
+      SINGER_SIGMA_Z: 2.0
+      COAST_TIME_LIMIT: 30.0
+      CONFIRM_HITS: 4
+      CONFIRM_EXISTENCE_THRESHOLD: 0.85
+      MIN_CONFIRM_RADARS: 2
+      SINGLE_RADAR_CONFIRM_HITS: 8
+      SINGLE_RADAR_CONFIRM_EXISTENCE: 0.95
+      SOURCE_MAP_TIMEOUT_S: 20.0
+      REVIVE_WINDOW_S: 10.0
+
+visualization:
+  max_visible_radar_measurements: 20
+  max_fused_points_per_track: 500
+  refresh_interval_ms: 250
+  max_line_gap_s: 1.0
+
+runtime:
+  state_snapshot: "runtime/realtime_state.json"
+  radar_queue_maxsize: 1000
+  fused_queue_maxsize: 1000
+  max_packet_age_s: 2.0
+  max_out_of_order_s: 0.25
+  max_udp_packet_bytes: 65507
+  duplicate_cache_size: 10000
+  drop_late_packets: true
+  queue_overflow_policy: "drop_oldest"
+
+data:
+  ground_truth_csv: "data/ground_truth_adsb_multi.csv"
+  example_radar_csv: "data/radar_sensor_tracks_gercekci.csv"
