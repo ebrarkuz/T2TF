@@ -7,7 +7,6 @@ import sys
 import time
 from typing import Any
 
-import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QPointF, QThread, QTimer, Qt, Slot
 from PySide6.QtGui import QCloseEvent
@@ -18,8 +17,8 @@ from PySide6.QtWidgets import (
 
 from realtime.runtime_config import DEFAULT_CONFIG_PATH, RuntimeConfig
 from .desktop_state import (
-    DesktopState, RADAR_LIMIT_OPTIONS, format_fused_details, format_radar_details,
-    load_ground_truth, split_track_segments,
+    DesktopState, RADAR_LIMIT_OPTIONS, format_fused_details, format_ground_truth_details,
+    format_radar_details, load_ground_truth, sample_track_points, select_visual_tracks,
 )
 from .udp_visualization_receiver import UdpVisualizationWorker
 
@@ -29,17 +28,22 @@ class DesktopWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.state = DesktopState(
-            config.max_visible_radar_measurements,
+            config.max_visible_radar_measurements_per_sensor,
             config.max_fused_points_per_track,
+            config.track_archive_timeout_s,
+            config.preserve_archived_tracks,
+            config.full_visual_history,
         )
         self.setWindowTitle("Sensor Fusion Realtime - 2B Takip")
         self.resize(1450, 850)
         self._connected = False
         self._hover_points: list[tuple[float, float, str]] = []
-        self._track_lines: dict[str, pg.PlotDataItem] = {}
+        self._track_lines: dict[str, pg.ScatterPlotItem] = {}
         self._track_markers: dict[str, pg.ScatterPlotItem] = {}
         self._track_labels: dict[str, pg.TextItem] = {}
+        self._radar_items: dict[str, pg.ScatterPlotItem] = {}
         self._ground_truth_items: list[Any] = []
+        self._ground_truth_hover_points: list[tuple[float, float, str]] = []
         self._build_ui()
         self._load_ground_truth_once()
         self._start_udp_worker()
@@ -61,19 +65,23 @@ class DesktopWindow(QMainWindow):
         self.radar_count_label = QLabel("0")
         self.fused_count_label = QLabel("0")
         self.active_tracks_label = QLabel("0")
+        self.archived_tracks_label = QLabel("0")
+        self.total_tracks_label = QLabel("0")
         form.addRow("Baglanti", self.connection_label)
         form.addRow("Son radar", self.last_radar_label)
         form.addRow("Son fused", self.last_fused_label)
         form.addRow("Radar sayisi", self.radar_count_label)
         form.addRow("Fused sayisi", self.fused_count_label)
         form.addRow("Aktif track", self.active_tracks_label)
+        form.addRow("Arsiv track", self.archived_tracks_label)
+        form.addRow("Toplam track", self.total_tracks_label)
         controls_layout.addLayout(form)
 
         self.show_gt = QCheckBox("Ground truth goster")
         self.show_gt.setChecked(True)
         self.show_radar = QCheckBox("Radar goster")
         self.show_radar.setChecked(True)
-        self.show_history = QCheckBox("Fused gecmisi goster")
+        self.show_history = QCheckBox("Fused goster")
         self.show_history.setChecked(True)
         self.show_labels = QCheckBox("Track etiketi goster")
         self.show_labels.setChecked(True)
@@ -84,7 +92,7 @@ class DesktopWindow(QMainWindow):
 
         self.radar_limit = QComboBox()
         self.radar_limit.addItems([str(value) for value in RADAR_LIMIT_OPTIONS])
-        self.radar_limit.setCurrentText(str(self.config.max_visible_radar_measurements))
+        self.radar_limit.setCurrentText(str(self.config.max_visible_radar_measurements_per_sensor))
         self.radar_limit.currentTextChanged.connect(
             lambda value: self.state.set_radar_limit(int(value))
         )
@@ -94,12 +102,17 @@ class DesktopWindow(QMainWindow):
         self.fused_limit.valueChanged.connect(self.state.set_fused_limit)
         self.track_filter = QComboBox()
         self.track_filter.addItem("Tum trackler")
+        self.track_state_filter = QComboBox()
+        self.track_state_filter.addItems([
+            "Normal gorunum", "Confirmed only", "Active hypotheses", "Tum trackler / debug"
+        ])
         self.sensor_filter = QComboBox()
         self.sensor_filter.addItem("Tum sensorler")
         filter_form = QFormLayout()
         filter_form.addRow("Radar limiti", self.radar_limit)
         filter_form.addRow("Track nokta limiti", self.fused_limit)
         filter_form.addRow("Track filtresi", self.track_filter)
+        filter_form.addRow("Track durumu", self.track_state_filter)
         filter_form.addRow("Sensor filtresi", self.sensor_filter)
         controls_layout.addLayout(filter_form)
 
@@ -122,10 +135,11 @@ class DesktopWindow(QMainWindow):
         self.plot.setLabel("left", "Y / North", units="m")
         self.plot.setAspectLocked(True)
         self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.radar_item = pg.ScatterPlotItem(
-            size=9, symbol="x", pen=pg.mkPen("#ffb000", width=2), brush=None
+        self.plot.addLegend(offset=(10, 10))
+        self._fused_legend_sample = self.plot.plot(
+            [], [], pen=None, symbol="o", symbolSize=6,
+            symbolBrush="#f5f5f5", name="Fused Track Noktalari"
         )
-        self.plot.addItem(self.radar_item)
         self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
 
         detail_widget = QWidget()
@@ -151,7 +165,7 @@ class DesktopWindow(QMainWindow):
             color = pg.intColor(index, hues=max(1, len(ground_truth.routes)), alpha=150)
             line = self.plot.plot(
                 [float(p["x"]) for p in points], [float(p["y"]) for p in points],
-                pen=pg.mkPen(color, width=1.5), name=f"GT {name}",
+                pen=pg.mkPen(color, width=1.5), name=f"Ground Truth - {name}",
             )
             endpoints = pg.ScatterPlotItem(
                 x=[float(points[0]["x"]), float(points[-1]["x"])],
@@ -160,6 +174,11 @@ class DesktopWindow(QMainWindow):
             )
             self.plot.addItem(endpoints)
             self._ground_truth_items.extend([line, endpoints])
+            sample_step = max(1, len(points) // 200)
+            self._ground_truth_hover_points.extend(
+                (float(point["x"]), float(point["y"]), format_ground_truth_details(name, point))
+                for point in points[::sample_step]
+            )
         self.plot.enableAutoRange()
 
     def _start_udp_worker(self) -> None:
@@ -213,8 +232,9 @@ class DesktopWindow(QMainWindow):
         self.last_fused_label.setText(str(snapshot["last_fused_time"] or "-"))
         self.radar_count_label.setText(str(snapshot["received_radar_count"]))
         self.fused_count_label.setText(str(snapshot["received_fused_count"]))
-        active = snapshot["runtime_status"].get("active_track_count", len(snapshot["fused_tracks"]))
-        self.active_tracks_label.setText(str(active))
+        self.active_tracks_label.setText(str(snapshot["active_track_count"]))
+        self.archived_tracks_label.setText(str(snapshot["archived_track_count"]))
+        self.total_tracks_label.setText(str(snapshot["total_seen_track_count"]))
         last = snapshot["last_datagram_wall_time"]
         if self._connected and last and time.time() - last < 2.0:
             self.connection_label.setStyleSheet("color: #42d66b")
@@ -222,73 +242,120 @@ class DesktopWindow(QMainWindow):
             self.connection_label.setStyleSheet("color: #e2a93b")
 
     def _render(self, snapshot: dict[str, Any]) -> None:
-        self._hover_points.clear()
+        self._hover_points = (
+            list(self._ground_truth_hover_points) if self.show_gt.isChecked() else []
+        )
         for item in self._ground_truth_items:
             item.setVisible(self.show_gt.isChecked())
 
         sensor_filter = self.sensor_filter.currentText()
-        radar = [m for m in snapshot["radar_measurements"]
-                 if sensor_filter == "Tum sensorler" or str(m.get("sensor_id")) == sensor_filter]
-        if self.show_radar.isChecked():
-            self.radar_item.setData(
-                x=[m["position"]["x_m"] for m in radar],
-                y=[m["position"]["y_m"] for m in radar],
+        radar_symbols = ("o", "t", "s", "d", "+", "x", "star")
+        for index, (sensor_id, radar) in enumerate(sorted(snapshot["radar_by_sensor"].items())):
+            item = self._radar_items.get(sensor_id)
+            if item is None:
+                color = pg.intColor(index, hues=max(7, len(snapshot["radar_by_sensor"])), alpha=230)
+                item = pg.ScatterPlotItem(
+                    size=9,
+                    symbol=radar_symbols[index % len(radar_symbols)],
+                    pen=pg.mkPen(color, width=1.5),
+                    brush=pg.mkBrush(color),
+                    name=sensor_id,
+                )
+                self.plot.addItem(item)
+                self.plot.plotItem.legend.addItem(item, sensor_id)
+                self._radar_items[sensor_id] = item
+            visible = (
+                self.show_radar.isChecked()
+                and (sensor_filter == "Tum sensorler" or sensor_id == sensor_filter)
             )
-            self._hover_points.extend(
-                (float(m["position"]["x_m"]), float(m["position"]["y_m"]), format_radar_details(m))
-                for m in radar
-            )
-        else:
-            self.radar_item.setData([], [])
+            if visible:
+                item.setData(
+                    x=[m["position"]["x_m"] for m in radar],
+                    y=[m["position"]["y_m"] for m in radar],
+                )
+                self._hover_points.extend(
+                    (float(m["position"]["x_m"]), float(m["position"]["y_m"]), format_radar_details(m))
+                    for m in radar
+                )
+            else:
+                item.setData([], [])
+        for sensor_id, item in self._radar_items.items():
+            if sensor_id not in snapshot["radar_by_sensor"]:
+                item.setData([], [])
 
         selected_track = self.track_filter.currentText()
+        state_filter = self.track_state_filter.currentText()
+        visual_tracks = select_visual_tracks(
+            snapshot["active_tracks"], snapshot["archived_tracks"], state_filter,
+            self.config.minimum_visible_tentative_points,
+        )
         visible_ids = set()
-        for track_id, all_points in snapshot["fused_tracks"].items():
+        for track_id, track_data in visual_tracks.items():
             if selected_track != "Tum trackler" and track_id != selected_track:
                 continue
-            points = all_points if self.show_predictions.isChecked() else [
+            visual_status = track_data["status"]
+            confirmed = track_data["ever_confirmed"]
+            all_points = track_data["points"]
+            filtered_points = all_points if self.show_predictions.isChecked() else [
                 p for p in all_points
                 if p.get("fusion_metadata", {}).get("update_type") != "prediction_only"
             ]
+            points = sample_track_points(
+                filtered_points, self.config.fused_display_interval_s
+            )
             if not points:
                 continue
             visible_ids.add(track_id)
             color = pg.intColor(abs(hash(track_id)) % 256, hues=256)
+            display_color = pg.mkColor(color)
+            display_color.setAlpha(
+                220 if confirmed and visual_status == "active"
+                else 100 if confirmed else 55
+            )
             line = self._track_lines.get(track_id)
             if line is None:
-                line = pg.PlotDataItem(pen=pg.mkPen(color, width=2), connect="finite")
+                line = pg.ScatterPlotItem()
                 self.plot.addItem(line)
                 self._track_lines[track_id] = line
-            segments = split_track_segments(points, self.config.max_line_gap_s)
-            x_values: list[float] = []
-            y_values: list[float] = []
-            for segment in segments:
-                if x_values:
-                    x_values.append(np.nan)
-                    y_values.append(np.nan)
-                x_values.extend(float(p["position"]["x_m"]) for p in segment)
-                y_values.extend(float(p["position"]["y_m"]) for p in segment)
-            line.setData(x_values, y_values)
+            point_pen = pg.mkPen(display_color, width=1)
+            if not confirmed:
+                point_pen.setStyle(Qt.PenStyle.DashLine)
+            line.setData(
+                x=[float(p["position"]["x_m"]) for p in points],
+                y=[float(p["position"]["y_m"]) for p in points],
+                size=7 if confirmed and visual_status == "active" else 5,
+                symbol="o",
+                pen=point_pen,
+                brush=pg.mkBrush(display_color) if confirmed else None,
+            )
             line.setVisible(self.show_history.isChecked())
 
             latest = points[-1]
             x, y = float(latest["position"]["x_m"]), float(latest["position"]["y_m"])
             marker = self._track_markers.get(track_id)
             if marker is None:
-                marker = pg.ScatterPlotItem(size=12, brush=color, pen=pg.mkPen("w", width=1))
+                marker = pg.ScatterPlotItem()
                 self.plot.addItem(marker)
                 self._track_markers[track_id] = marker
-            marker.setData([x], [y])
-            marker.setVisible(True)
+            marker_pen = pg.mkPen(display_color, width=1)
+            if not confirmed:
+                marker_pen.setStyle(Qt.PenStyle.DashLine)
+            marker.setData(
+                [x], [y], size=13 if confirmed and visual_status == "active" else 9,
+                brush=pg.mkBrush(display_color) if confirmed else None, pen=marker_pen,
+            )
+            marker.setVisible(self.show_history.isChecked())
             label = self._track_labels.get(track_id)
             if label is None:
-                label = pg.TextItem(track_id, color=color, anchor=(0, 1))
+                label = pg.TextItem(track_id, anchor=(0, 1))
                 self.plot.addItem(label)
                 self._track_labels[track_id] = label
+            label.setText(track_id, color=display_color)
             label.setPos(x, y)
-            label.setVisible(self.show_labels.isChecked())
+            label.setVisible(self.show_history.isChecked() and self.show_labels.isChecked())
             self._hover_points.extend(
-                (float(p["position"]["x_m"]), float(p["position"]["y_m"]), format_fused_details(p))
+                (float(p["position"]["x_m"]), float(p["position"]["y_m"]),
+                 format_fused_details(p, visual_status))
                 for p in points
             )
 

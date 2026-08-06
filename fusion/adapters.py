@@ -7,6 +7,10 @@ from typing import Any
 from .algorithms import advanced_ca, basic_cv, dual_imm
 
 
+def _measurement_sort_key(item):
+    return (float(item["timestamp"]), str(item["src"][0]), str(item["src"][1]), str(item["measurement_id"]))
+
+
 def _set_parameters(module, parameters: dict[str, Any], allowed: set[str]) -> None:
     unknown = set(parameters) - allowed
     if unknown:
@@ -59,8 +63,23 @@ class BasicCVAdapter:
         self.center = basic_cv.FusionCenter()
         self.processed = 0
         self.last_assignment = None
+        self.last_batch_assignments = {}
 
     def process_measurement(self, measurement):
+        return self.process_batch([measurement])
+
+    def process_batch(self, measurements):
+        self.last_batch_assignments = {}
+        snapshots = []
+        for measurement in sorted(measurements, key=_measurement_sort_key):
+            snapshots = self._process_single(measurement)
+            if self.last_assignment is not None:
+                self.last_batch_assignments[str(measurement["measurement_id"])] = {
+                    "track_id": str(self.last_assignment), "stage": "update_or_create"
+                }
+        return snapshots
+
+    def _process_single(self, measurement):
         before = {t.id: t.hits_count for t in self.center.global_tracks}
         self.center.process_measurement(
             measurement["timestamp"], measurement["state"], measurement["cov"],
@@ -113,17 +132,32 @@ class AdvancedCAAdapter:
         )
         self.processed = 0
         self.last_assignment = None
+        self.last_batch_assignments = {}
 
     def process_measurement(self, measurement):
-        src = measurement["src"]
+        return self.process_batch([measurement])
+
+    def process_batch(self, measurements):
+        ordered = sorted(measurements, key=_measurement_sort_key)
+        if not ordered:
+            return []
         before = set(self.center.src_map)
-        self.center.process_batch(measurement["timestamp"], [measurement])
-        assigned = self.center.src_map.get(src)
-        stage = "source_map" if src in before else "association_or_create"
-        self.processed += 1
-        self.last_assignment = assigned
+        self.center.process_batch(max(item["timestamp"] for item in ordered), ordered)
+        self.last_batch_assignments = {}
+        for measurement in ordered:
+            assigned = self.center.src_map.get(measurement["src"])
+            if assigned is not None:
+                self.last_batch_assignments[str(measurement["measurement_id"])] = {
+                    "track_id": str(assigned),
+                    "stage": "source_map" if measurement["src"] in before else "association_or_create",
+                }
+        assigned_ids = {item["track_id"] for item in self.last_batch_assignments.values()}
+        self.processed += len(ordered)
+        last = self.last_batch_assignments.get(str(ordered[-1]["measurement_id"]), {})
+        self.last_assignment = last.get("track_id")
         return [
-            _snapshot(t, (0, 1, 3, 4, 6, 7), used=t.id == assigned, stage=stage,
+            _snapshot(t, (0, 1, 3, 4, 6, 7), used=str(t.id) in assigned_ids,
+                      stage="batch_association",
                       filter_name="Advanced CA", model="CA")
             for t in self.center.tracks
         ]
@@ -174,21 +208,37 @@ class DualIMMAdapter:
         self.processed = 0
         self.last_assignment = None
         self.last_stage = ""
+        self.last_batch_assignments = {}
 
     def process_measurement(self, measurement):
+        return self.process_batch([measurement])
+
+    def process_batch(self, measurements):
+        ordered = sorted(measurements, key=_measurement_sort_key)
+        if not ordered:
+            return []
         start = len(self.center.diagnostic_events)
-        self.center.process_batch(measurement["timestamp"], [measurement])
+        self.center.process_batch(max(item["timestamp"] for item in ordered), ordered)
         events = [e for e in self.center.diagnostic_events[start:]
                   if e.get("event_type") == "measurement"]
-        event = events[-1] if events else {}
+        self.last_batch_assignments = {
+            str(event["measurement_id"]): {
+                "track_id": str(event["assigned_global_track_id"]),
+                "stage": str(event.get("accepted_stage", "")),
+            }
+            for event in events
+            if event.get("measurement_id") is not None
+            and event.get("assigned_global_track_id") is not None
+        }
         self.center.diagnostic_events.clear()
-        assigned = event.get("assigned_global_track_id")
-        stage = event.get("accepted_stage", "")
-        self.processed += 1
+        last = self.last_batch_assignments.get(str(ordered[-1]["measurement_id"]), {})
+        assigned, stage = last.get("track_id"), last.get("stage", "")
+        assigned_ids = {item["track_id"] for item in self.last_batch_assignments.values()}
+        self.processed += len(ordered)
         self.last_assignment, self.last_stage = assigned, stage
         return [
-            _snapshot(t, (0, 1, 3, 4, 6, 7), used=str(t.id) == str(assigned),
-                      stage=stage if str(t.id) == str(assigned) else "",
+            _snapshot(t, (0, 1, 3, 4, 6, 7), used=str(t.id) in assigned_ids,
+                      stage="batch_association" if str(t.id) in assigned_ids else "",
                       filter_name="Dual-IMM", model=t.dominant_model())
             for t in self.center.tracks
         ]
@@ -197,7 +247,8 @@ class DualIMMAdapter:
         return {"algorithm": "dual_imm", "processed_measurements": self.processed,
                 "active_track_count": len(self.center.tracks),
                 "last_assigned_track_id": self.last_assignment,
-                "last_association_stage": self.last_stage}
+                "last_association_stage": self.last_stage,
+                "last_batch_size": len(self.last_batch_assignments)}
 
     @property
     def tracks(self):

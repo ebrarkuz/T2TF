@@ -18,6 +18,7 @@ class ReceivedDatagram:
     payload: bytes
     address: tuple[str, int]
     received_at: float
+    received_at_monotonic: float
 
 
 class UdpRadarReceiver:
@@ -91,7 +92,7 @@ class UdpRadarReceiver:
             except OSError:
                 break
             self.received_count += 1
-            self._enqueue(ReceivedDatagram(payload, address, time.time()))
+            self._enqueue(ReceivedDatagram(payload, address, time.time(), time.monotonic()))
             LOG.debug("Radar paketi alındı: bytes=%d source=%s", len(payload), address)
 
     def stop(self) -> None:

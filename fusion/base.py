@@ -12,6 +12,9 @@ class FusionAlgorithm(Protocol):
     def process_measurement(self, measurement: Any) -> list[dict[str, Any]]:
         ...
 
+    def process_batch(self, measurements: list[Any]) -> list[dict[str, Any]]:
+        ...
+
     def reset(self) -> None:
         ...
 

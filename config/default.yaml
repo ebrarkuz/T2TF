@@ -48,16 +48,26 @@ fusion:
 visualization:
   telemetry_host: "127.0.0.1"
   telemetry_port: 8890
-  max_visible_radar_measurements: 20
-  max_fused_points_per_track: 500
+  max_visible_radar_measurements_per_sensor: 20
+  max_fused_points_per_track: 2000
+  track_archive_timeout_s: 5.0
+  preserve_archived_tracks: true
+  full_visual_history: false
+  fused_display_interval_s: 1.0
+  minimum_visible_tentative_points: 2
   refresh_interval_ms: 250
   max_line_gap_s: 1.0
 
 runtime:
+  micro_batch_enabled: true
+  micro_batch_window_ms: 40
+  timestamp_group_tolerance_ms: 5
+  max_micro_batch_size: 100
+  max_micro_batch_wait_ms: 75
   radar_queue_maxsize: 1000
   fused_queue_maxsize: 1000
-  max_packet_age_s: 2.0
-  max_out_of_order_s: 0.25
+  max_packet_age_s: 10.0
+  max_out_of_order_s: 0.1
   max_udp_packet_bytes: 65507
   duplicate_cache_size: 10000
   drop_late_packets: true

@@ -58,11 +58,35 @@ Telemetri ve görselleştirme:
 visualization:
   telemetry_host: "127.0.0.1"
   telemetry_port: 8890
-  max_visible_radar_measurements: 20
-  max_fused_points_per_track: 500
+  max_visible_radar_measurements_per_sensor: 20
+  max_fused_points_per_track: 2000
+  track_archive_timeout_s: 5.0
+  preserve_archived_tracks: true
+  full_visual_history: false
+  fused_display_interval_s: 1.0
+  minimum_visible_tentative_points: 2
   refresh_interval_ms: 250
   max_line_gap_s: 1.0
 ```
+
+Gercek zamanli association, ayni radar taramasini paket gelis sirasindan bagimsiz
+islemek icin bounded micro-batch kullanir:
+
+```yaml
+runtime:
+  micro_batch_enabled: true
+  micro_batch_window_ms: 40
+  timestamp_group_tolerance_ms: 5
+  max_micro_batch_size: 100
+  max_micro_batch_wait_ms: 75
+  max_out_of_order_s: 0.1
+```
+
+Paketli CSV'de farkli taramalar arasindaki en kucuk pozitif zaman farki 10 ms
+oldugu icin timestamp toleransi 5 ms secilmistir. Timeout hesabi monotonic saatle
+yapilir; yeni timestamp grubu, boyut limiti, idle timeout ve shutdown tamponu
+flush eder. Association cekirdegi gruptaki tum olcumleri tek `process_batch`
+cagrisinda alir.
 
 `RADAR_UDP_PORT`, `FUSED_UDP_PORT`, `TELEMETRY_UDP_PORT`, `FUSION_ALGORITHM` ve `FUSION_CONFIG` environment override olarak kullanılabilir.
 
@@ -147,9 +171,19 @@ python tools/fused_udp_listener.py --host 0.0.0.0 --port 8888
 PySide6 UI ana thread'de çalışır. UDP 8890 socket'i ayrı `QThread` içindeki worker tarafından okunur; Qt signal/slot ile doğrulanmış mesajlar bounded `DesktopState` deposuna aktarılır. `QTimer`, yapılandırılabilir aralıkta çizimi yeniler; her UDP mesajında repaint yapılmaz.
 
 - Ground truth rotaları bir kez yüklenir ve çizgi olarak tutulur.
-- Radar geçmişi varsayılan `deque(maxlen=20)` kullanır; 10/20/50/100 seçilebilir.
-- Her track kendi bounded geçmişinde ve kendi kalıcı `PlotDataItem` nesnesinde tutulur.
-- Büyük zaman boşluklarında çizgiye `NaN` ayracı eklenir; yapay bağlantı çizilmez.
+- Her `sensor_id`, kendi `deque(maxlen=20)` radar tamponunu kullanır; limit sensör başına 10/20/50/100 seçilebilir.
+- Her sensör dinamik oluşturulan ayrı marker, renk ve legend serisiyle çizilir.
+- Track rotaları füzyon state'inden bağımsız `active_tracks` ve `archived_tracks` görsel arşivlerinde tutulur.
+- Beş saniye yeni fused mesajı almayan track yalnız görsel olarak arşivlenir; rotası ve son marker'ı ekranda kalır. Aynı ID yeniden mesaj alırsa geçmişiyle active duruma döner.
+- Varsayılan `Normal gorunum`; active tentative ve active confirmed track'leri,
+  archived confirmed geçmişlerini ve en az iki noktalı archived tentative
+  hipotezleri gösterir. Tek noktalı archived tentative track'ler gizlenir.
+- `Confirmed only`, `Active hypotheses` ve `Tum trackler / debug` filtreleri bulunur.
+  Tentative track'ler soluk, içi boş ve kesikli kenarlı gösterilir.
+- Her track kendi kalıcı `ScatterPlotItem` nokta serisinde tutulur ve varsayılan olarak en fazla 2000 state saklar.
+- Limit aşılırsa başlangıç, bitiş, örneklenmiş eski noktalar ve en güncel noktalar korunur. `full_visual_history: true` downsampling'i kapatır.
+- Fused geçmiş çizgi olarak birleştirilmez; her global track için saniyede bir ayrı nokta gösterilir.
+- Güncel fused konum, geçmiş noktalarından daha büyük ayrı marker ile gösterilir.
 - Radar tek bir `ScatterPlotItem` ile gösterilir.
 - Track marker ve etiketleri yeniden kullanılır.
 - Hover, mouse'a 14 piksel içindeki en yakın görünür noktayı bulup tek detay panelini günceller.
@@ -163,18 +197,6 @@ Ground truth bulunamazsa uygulama uyarı gösterir ve canlı telemetriyle çalı
 `data/ground_truth_adsb_multi.csv`: `time,x,y,z,vx,vy,vz,callsign,lat,lon,alt_m,time_unix,target_id,target_name,speed,heading,turn_rate,climb_rate,spiral_center_x_m,spiral_center_y_m,spiral_radius_m,spiral_theta_rad`.
 
 `data/radar_sensor_tracks_gercekci.csv`: `time,sensor,local_track_id,callsign_true,x,y,z,vx,vy,vz,track_quality,sigma_pos_m,sigma_vel_mps,is_clutter`. Değerlendirme etiketleri füzyon kararında kullanılmaz.
-
-## Testler
-
-```bash
-python -m unittest discover -s tests -v
-python -m realtime.fusion_runtime --help
-python -m visualization.desktop_app --help
-python tools/radar_udp_replay.py --help
-python tools/fused_udp_listener.py --help
-```
-
-Qt smoke testi `QT_QPA_PLATFORM=offscreen` ile gerçek ekran gerektirmeden pencere başlangıcı ve worker kapanışını doğrular.
 
 ## Windows EXE paketleme
 

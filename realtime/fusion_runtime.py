@@ -8,13 +8,15 @@ import queue
 import signal
 import threading
 import time
-from dataclasses import asdict, dataclass
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
 from fusion import create_fusion_algorithm
 from fusion.measurement import TQ_MAX, TQ_MIN, measurement_covariance
 from .message_schema import RadarMessageValidator
+from .micro_batch import BufferedMeasurement, MeasurementMicroBatcher
 from .runtime_config import DEFAULT_CONFIG_PATH, RuntimeConfig
 from .udp_fused_publisher import UdpFusedPublisher
 from .udp_json_publisher import UdpJsonPublisher
@@ -36,6 +38,10 @@ class RuntimeCounters:
     max_queue_depth: int = 0
     latency_sum_ms: float = 0.0
     latency_max_ms: float = 0.0
+    processed_micro_batches: int = 0
+    micro_batch_measurements: int = 0
+    micro_batch_max_size: int = 0
+    rejected_reasons: dict[str, int] = field(default_factory=dict)
 
 
 class FusionRuntime:
@@ -75,6 +81,12 @@ class FusionRuntime:
         self.fusion = create_fusion_algorithm(
             self.config.fusion_algorithm, self.config.fusion_parameters
         )
+        self.micro_batcher = MeasurementMicroBatcher(
+            window_ms=self.config.micro_batch_window_ms,
+            timestamp_tolerance_ms=self.config.timestamp_group_tolerance_ms,
+            max_batch_size=self.config.max_micro_batch_size,
+            max_wait_ms=self.config.max_micro_batch_wait_ms,
+        )
         self.counters = RuntimeCounters()
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
@@ -103,18 +115,29 @@ class FusionRuntime:
         )
 
     def _worker_loop(self) -> None:
+        poll_timeout = min(
+            0.2,
+            self.config.micro_batch_window_ms / 1000.0,
+            self.config.max_micro_batch_wait_ms / 1000.0,
+        ) if self.config.micro_batch_enabled else 0.2
         while not self.stop_event.is_set() or not self.input_queue.empty():
             try:
-                datagram = self.input_queue.get(timeout=0.2)
+                datagram = self.input_queue.get(timeout=max(0.005, poll_timeout))
             except queue.Empty:
+                self._flush_ready_micro_batches(time.monotonic())
                 self._publish_runtime_status_if_due()
                 continue
             try:
-                self.process_datagram(datagram.payload, datagram.received_at)
+                self.process_datagram(
+                    datagram.payload,
+                    datagram.received_at,
+                    received_at_monotonic=datagram.received_at_monotonic,
+                )
             except Exception:
                 LOG.exception("Radar paketi işlenirken beklenmeyen hata")
             finally:
                 self.input_queue.task_done()
+        self._flush_ready_micro_batches(force=True)
 
     def _measurement_from_message(self, message: dict[str, Any]) -> dict[str, Any]:
         position, velocity = message["position"], message["velocity"]
@@ -138,7 +161,6 @@ class FusionRuntime:
         tq = float(np.clip(message.get("track_quality", 8.0), TQ_MIN, TQ_MAX))
         source_track_id = (
             message.get("source_track_id")
-            or message.get("target_hint")
             or message["measurement_id"]
         )
         return {
@@ -192,9 +214,14 @@ class FusionRuntime:
         payload: bytes,
         received_at: float | None = None,
         *,
+        received_at_monotonic: float | None = None,
         publish: bool = True,
     ) -> list[dict[str, Any]]:
         received_at = time.time() if received_at is None else float(received_at)
+        received_at_monotonic = (
+            time.monotonic() if received_at_monotonic is None
+            else float(received_at_monotonic)
+        )
         started = time.perf_counter()
         with self._counter_lock:
             self.counters.total_packets += 1
@@ -203,6 +230,9 @@ class FusionRuntime:
         if not result.accepted:
             with self._counter_lock:
                 self.counters.rejected_packets += 1
+                reasons = dict(self.counters.rejected_reasons)
+                reasons[str(result.reason)] = reasons.get(str(result.reason), 0) + 1
+                self.counters.rejected_reasons = reasons
             LOG.warning("Radar paketi reddedildi: %s", result.reason)
             self._publish_runtime_status_if_due()
             return []
@@ -211,60 +241,19 @@ class FusionRuntime:
         with self._counter_lock:
             self.counters.valid_packets += 1
         measurement = self._measurement_from_message(message)
-        previous_tracks = {
-            str(track.id): str(getattr(track, "status", getattr(track, "state_status", "")))
-            for track in self.fusion.tracks
-        }
-        track_snapshots = self.fusion.process_measurement(measurement)
-        current_tracks = {t["track_id"]: t["track_status"].upper() for t in track_snapshots}
-        for track_id in current_tracks.keys() - previous_tracks.keys():
-            LOG.info("Track oluşturuldu: %s", track_id)
-        for track_id, status in current_tracks.items():
-            if status == "CONFIRMED" and previous_tracks.get(track_id) != "CONFIRMED":
-                LOG.info("Track confirmed oldu: %s", track_id)
-        for track_id in previous_tracks.keys() - current_tracks.keys():
-            LOG.info("Track silindi: %s", track_id)
-        assigned_snapshot = next((t for t in track_snapshots if t["measurement_used"]), None)
-        assigned_track_id = assigned_snapshot["track_id"] if assigned_snapshot else None
-        accepted_stage = assigned_snapshot["association_stage"] if assigned_snapshot else "unassigned"
-        radar_record = dict(message)
-        radar_record.update({
-            "received_at": received_at,
-            "used_in_fusion": assigned_track_id is not None,
-            "assigned_track_id": assigned_track_id,
-            "association_stage": accepted_stage,
-            "rejection_reason": None if assigned_track_id is not None else "association_rejected",
-        })
-        if publish:
-            self.telemetry_publisher.publish(radar_record)
-
-        used_by_track: dict[str, list[dict[str, Any]]] = {}
-        if assigned_track_id is not None:
-            used_by_track[str(assigned_track_id)] = [
-                {
-                    "measurement_id": message["measurement_id"],
-                    "sensor_id": message["sensor_id"],
-                    "measurement_timestamp": message["timestamp"],
-                    "sequence_number": message["sequence_number"],
-                    "received_at": received_at,
-                }
-            ]
-            LOG.debug(
-                "Association sonucu: measurement=%s track=%s stage=%s",
-                message["measurement_id"], assigned_track_id, accepted_stage,
-            )
-
-        fused_messages = []
-        for track in track_snapshots:
-            used = used_by_track.get(track["track_id"], [])
-            fused_message = self._fused_message(track, message["timestamp"], used)
-            fused_messages.append(fused_message)
-            if publish:
-                if self.publisher.publish(fused_message):
-                    with self._counter_lock:
-                        self.counters.published_fused_messages += 1
-                        self.counters.last_fused_publish_time = fused_message["publish_timestamp"]
-                self.telemetry_publisher.publish(fused_message)
+        entry = BufferedMeasurement(
+            message=message,
+            measurement=measurement,
+            received_at=received_at,
+            received_at_monotonic=received_at_monotonic,
+        )
+        if not self.config.micro_batch_enabled:
+            outputs = self._process_measurement_batch([entry], publish=publish)
+        else:
+            self.micro_batcher.add(entry)
+            outputs = []
+            for batch in self.micro_batcher.pop_ready_batches(received_at_monotonic):
+                outputs.extend(self._process_measurement_batch(batch, publish=publish))
 
         latency_ms = (time.perf_counter() - started) * 1000.0
         with self._counter_lock:
@@ -274,7 +263,98 @@ class FusionRuntime:
                 self.counters.max_queue_depth, self.input_queue.qsize()
             )
         self._publish_runtime_status_if_due()
+        return outputs
+
+    def _process_measurement_batch(
+        self,
+        entries: list[BufferedMeasurement],
+        *,
+        publish: bool = True,
+    ) -> list[dict[str, Any]]:
+        if not entries:
+            return []
+        entries = sorted(entries, key=lambda item: item.measurement["timestamp"])
+        measurements = [item.measurement for item in entries]
+        batch_time = max(item["timestamp"] for item in measurements)
+        span_ms = (batch_time - min(item["timestamp"] for item in measurements)) * 1000.0
+        sensor_ids = sorted({str(item.message["sensor_id"]) for item in entries})
+        LOG.info(
+            "Micro-batch: size=%d start=%.6f end=%.6f span_ms=%.3f sensors=%s",
+            len(entries), min(item["timestamp"] for item in measurements), batch_time,
+            span_ms, ",".join(sensor_ids),
+        )
+        with self._counter_lock:
+            self.counters.processed_micro_batches += 1
+            self.counters.micro_batch_measurements += len(entries)
+            self.counters.micro_batch_max_size = max(
+                self.counters.micro_batch_max_size, len(entries)
+            )
+
+        previous_tracks = {
+            str(track.id): str(getattr(track, "status", getattr(track, "state_status", "")))
+            for track in self.fusion.tracks
+        }
+        track_snapshots = self.fusion.process_batch(measurements)
+        current_tracks = {t["track_id"]: t["track_status"].upper() for t in track_snapshots}
+        for track_id in current_tracks.keys() - previous_tracks.keys():
+            LOG.info("Track oluşturuldu: %s", track_id)
+        for track_id, status in current_tracks.items():
+            if status == "CONFIRMED" and previous_tracks.get(track_id) != "CONFIRMED":
+                LOG.info("Track confirmed oldu: %s", track_id)
+        for track_id in previous_tracks.keys() - current_tracks.keys():
+            LOG.info("Track silindi: %s", track_id)
+        assignments = dict(getattr(self.fusion, "last_batch_assignments", {}))
+        used_by_track: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for entry in entries:
+            message = entry.message
+            assignment = assignments.get(str(message["measurement_id"]), {})
+            assigned_track_id = assignment.get("track_id")
+            accepted_stage = assignment.get("stage", "unassigned")
+            radar_record = dict(message)
+            radar_record.update({
+                "received_at": entry.received_at,
+                "used_in_fusion": assigned_track_id is not None,
+                "assigned_track_id": assigned_track_id,
+                "association_stage": accepted_stage,
+                "rejection_reason": None if assigned_track_id is not None else "association_rejected",
+            })
+            if publish:
+                self.telemetry_publisher.publish(radar_record)
+            if assigned_track_id is not None:
+                used_by_track[str(assigned_track_id)].append({
+                    "measurement_id": message["measurement_id"],
+                    "sensor_id": message["sensor_id"],
+                    "measurement_timestamp": message["timestamp"],
+                    "sequence_number": message["sequence_number"],
+                    "received_at": entry.received_at,
+                })
+
+        fused_messages = []
+        for track in track_snapshots:
+            used = used_by_track.get(track["track_id"], [])
+            fused_message = self._fused_message(track, batch_time, used)
+            fused_messages.append(fused_message)
+            if publish:
+                if self.publisher.publish(fused_message):
+                    with self._counter_lock:
+                        self.counters.published_fused_messages += 1
+                        self.counters.last_fused_publish_time = fused_message["publish_timestamp"]
+                self.telemetry_publisher.publish(fused_message)
+
         return fused_messages
+
+    def _flush_ready_micro_batches(
+        self,
+        current_monotonic_time: float | None = None,
+        *,
+        force: bool = False,
+        publish: bool = True,
+    ) -> list[dict[str, Any]]:
+        now = time.monotonic() if current_monotonic_time is None else float(current_monotonic_time)
+        outputs = []
+        for batch in self.micro_batcher.pop_ready_batches(now, force=force):
+            outputs.extend(self._process_measurement_batch(batch, publish=publish))
+        return outputs
 
     def _diagnostic_snapshot(self) -> dict[str, Any]:
         with self._counter_lock:
@@ -293,6 +373,11 @@ class FusionRuntime:
                 for t in self.fusion.tracks
             ),
             "fusion_algorithm": self.config.fusion_algorithm,
+            "micro_batch_enabled": self.config.micro_batch_enabled,
+            "micro_batch_pending_measurements": len(self.micro_batcher),
+            "micro_batch_window_ms": self.config.micro_batch_window_ms,
+            "timestamp_group_tolerance_ms": self.config.timestamp_group_tolerance_ms,
+            "track_deletion_requires_measurement_tick": True,
             "radar_queue_depth": self.input_queue.qsize(),
             "radar_queue_capacity": self.config.radar_queue_maxsize,
             "receiver_overflow_count": self.receiver.overflow_count,
@@ -328,6 +413,7 @@ class FusionRuntime:
         self.receiver.stop()
         if self.worker and self.worker.is_alive():
             self.worker.join(timeout=3.0)
+        self._flush_ready_micro_batches(force=True)
         self.counters.queue_dropped_packets = self.receiver.overflow_count
         self._publish_runtime_status_if_due(force=True)
         self.publisher.close()
