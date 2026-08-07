@@ -23,3 +23,9 @@ tmp*/
 temp/
 .test_*.json
 .test_*.yaml
+
+# Local simulation result files
+/radar_sensor_tracks_idealize.csv
+/res_real_adv_fixed_q.csv
+/res_real_basic.csv
+/res_real_imm.csv
